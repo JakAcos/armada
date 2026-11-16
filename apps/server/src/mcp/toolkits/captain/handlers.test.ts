@@ -154,10 +154,11 @@ it.effect("a caller below the captain thread's mode cannot message it or answer 
   }),
 );
 
-it.effect("a caller at the captain thread's mode relays as an agent from its own thread", () =>
+it.effect("a peer captain, or any caller at the captain's mode, sends from its thread", () =>
   Effect.gen(function* () {
     const calls: Array<ServiceCall> = [];
     yield* callAll.pipe(Effect.provide(harness({ callerMode: "full-access", calls })));
+    // The service tells a peer captain from any other agent by this thread.
     const relayed = { createdBy: "agent", creationSource: "mcp", senderThreadId: callerThreadId };
     expect(calls).toEqual([
       expect.objectContaining({ method: "create" }),

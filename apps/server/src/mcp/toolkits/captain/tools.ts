@@ -62,7 +62,7 @@ const CaptainListTool = Tool.make("captain_list", {
 const CaptainMessageTool = Tool.make("captain_message", {
   ...shared,
   description:
-    "Relay the user's instruction to a captain. It is queued as the captain's next turn, marked as relayed by an agent.",
+    "Message a captain: relay the user's instruction or, as a captain, coordinate with a peer. Queued as its next turn, labeled with the sender.",
   parameters: CaptainMessageInput,
   success: CaptainMutationResult,
 })

@@ -24,6 +24,18 @@ told when a message or an answer was relayed by an agent rather than sent by you
 the same access to the captain's thread as it needs to message any other thread. A need is yours
 to answer: no captain can resolve one, and neither can a captain's crew.
 
+## Captains working together
+
+Captains can message each other, including captains in other projects, for example to agree on
+an API between a frontend and a backend captain. A captain is told which captain a message came
+from, and that it is a peer's request rather than your instruction. A retired captain cannot
+message other captains.
+
+Two captains can exchange six messages, in either direction, before one of them hears from you.
+After that, the next message between them is refused and the captain is told to raise a need
+instead. A message you send to either captain, or an answer to either captain's need, lets them
+carry on. Decisions still come to you: captains cannot answer each other's needs.
+
 ## Needs you
 
 **Needs you** lists every open blocker and decision your captains have raised. Write your answer
