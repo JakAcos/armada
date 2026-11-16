@@ -14,17 +14,22 @@ Open **Captains** from the sidebar or the command palette.
    outcome it works toward.
 3. Select **Start captain**.
 
-The captain gets its own thread in that project and runs on the project's default model, so set
-one in the project settings first. Its first turn writes a plan, then starts crew tasks.
+The captain gets its own thread in that project and runs on the project's default model and
+default mode, so set a model in the project settings first. Its first turn writes a plan, then
+starts crew tasks.
 
 Agents can also start and manage captains with the `captain_create`, `captain_list`,
-`captain_message`, and `captain_resolve_need` tools, but only when you ask them to.
+`captain_message`, and `captain_resolve_need` tools, but only when you ask them to. The captain is
+told when a message or an answer was relayed by an agent rather than sent by you. An agent needs
+the same access to the captain's thread as it needs to message any other thread, and a captain
+cannot answer its own needs.
 
 ## Needs you
 
 **Needs you** lists every open blocker and decision your captains have raised. Write your answer
-and select **Resolve**. The captain receives the answer as a message and carries on. A captain can
-also withdraw a need it no longer has.
+and select **Resolve**. The captain receives the answer as a message and carries on. If the answer
+cannot be delivered, for example because the captain's thread is archived, the need stays in the
+list so you can answer again. A captain can also withdraw a need it no longer has.
 
 Captains are told not to ask questions in chat, so this list is the one place to look. You can
 still open a captain's thread to watch it work or send it a message from its card.
@@ -36,5 +41,11 @@ tasks are ordinary child threads; open them from the captain's thread.
 
 ## Retire a captain
 
-Select **Retire** when the work is done. A retired captain cannot receive messages or raise
-needs, and its open needs leave **Needs you**. Select **Reactivate** to bring it back.
+Select **Retire** to stop a captain. Its current turn is stopped and it is told it is retired. A
+retired captain cannot receive messages or raise needs, and its open needs leave **Needs you**.
+Crew tasks that are already running finish on their own; stop one from its thread if you need to.
+
+Select **Reactivate** to bring it back. Its needs return to **Needs you** and it picks its charter
+up again.
+
+A captain lives in its thread. If you delete that thread, the captain leaves the list.

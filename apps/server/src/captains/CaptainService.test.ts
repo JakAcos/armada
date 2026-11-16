@@ -1,18 +1,26 @@
 import { assert, it } from "@effect/vitest";
 import {
-  CaptainError,
   CaptainNeedId,
+  type CaptainError,
+  type OrchestrationV2ThreadShell,
+  type Project,
   ProjectId,
   ProviderInstanceId,
+  type RuntimeMode,
   ThreadId,
+  isCaptainError,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
-import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as Stream from "effect/Stream";
 
+import { OrchestratorRuntimeModeAboveCeilingError } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -20,9 +28,10 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CaptainService from "./CaptainService.ts";
 
-const isCaptainError = Schema.is(CaptainError);
 const projectId = ProjectId.make("project:test");
+const bareProjectId = ProjectId.make("project:no-default-model");
 const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
+const fromUser = { createdBy: "user", creationSource: "web" } as const;
 
 const failureOf = <A, E>(exit: Exit.Exit<A, E>) => {
   assert.isTrue(Exit.isFailure(exit));
@@ -32,63 +41,133 @@ const failureOf = <A, E>(exit: Exit.Exit<A, E>) => {
   return value as CaptainError;
 };
 
+type LaunchOutcome = "starts" | "fails-before-thread" | "fails-after-thread" | "above-ceiling";
+
 interface Harness {
   readonly launches: Ref.Ref<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>;
   readonly sends: Ref.Ref<ReadonlyArray<ThreadManagementService.ThreadManagementSendInput>>;
+  readonly interrupts: Ref.Ref<ReadonlyArray<ThreadId>>;
+  /** Threads that exist, and whether each was deleted. */
+  readonly threads: Ref.Ref<ReadonlyMap<ThreadId, { readonly deleted: boolean }>>;
+  /** While true, a send fails as it does for an archived thread. */
+  readonly threadArchived: Ref.Ref<boolean>;
 }
 
-const makeLayer = (
-  harness: Harness,
-  options: {
-    readonly launchFails?: boolean;
-    readonly subagents?: ReadonlyArray<Record<string, unknown>>;
-  } = {},
-) =>
-  CaptainService.layer.pipe(
+interface HarnessOptions {
+  readonly launch?: LaunchOutcome;
+  readonly defaultRuntimeMode?: RuntimeMode;
+  readonly subagents?: ReadonlyArray<Record<string, unknown>>;
+}
+
+const makeLayer = (harness: Harness, options: HarnessOptions) => {
+  const outcome = options.launch ?? "starts";
+  const commitThread = (threadId: ThreadId) =>
+    Ref.update(harness.threads, (threads) => new Map(threads).set(threadId, { deleted: false }));
+  return CaptainService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadLaunchService.ThreadLaunchService)({
           launch: (input) =>
-            options.launchFails === true
-              ? Effect.fail(
-                  new ThreadLaunchService.ThreadLaunchError({
-                    operation: "create-thread",
-                    commandId: input.commandId,
-                    projectId: input.projectId,
-                    cause: "provider unavailable",
-                  }),
-                )
-              : Ref.update(harness.launches, (all) => [...all, input]).pipe(
-                  Effect.as({
-                    threadId: input.threadId!,
-                    projection: {} as never,
-                    resumed: false,
-                  }),
-                ),
+            Effect.gen(function* () {
+              yield* Ref.update(harness.launches, (all) => [...all, input]);
+              const threadId = input.threadId!;
+              if (outcome === "fails-before-thread" || outcome === "above-ceiling") {
+                return yield* new ThreadLaunchService.ThreadLaunchError({
+                  operation: "create-thread",
+                  commandId: input.commandId,
+                  projectId: input.projectId,
+                  cause:
+                    outcome === "above-ceiling"
+                      ? new OrchestratorRuntimeModeAboveCeilingError({
+                          commandId: input.commandId,
+                          threadId,
+                          refused: "mode",
+                          runtimeMode: input.runtimeMode,
+                          maxRuntimeMode: "approval-required",
+                          organization: "Example Corp",
+                        })
+                      : "provider unavailable",
+                });
+              }
+              yield* commitThread(threadId);
+              if (outcome === "fails-after-thread") {
+                return yield* new ThreadLaunchService.ThreadLaunchError({
+                  operation: "update-thread",
+                  commandId: input.commandId,
+                  projectId: input.projectId,
+                  threadId,
+                  cause: "projection read failed",
+                });
+              }
+              return { threadId, projection: {} as never, resumed: false };
+            }),
         }),
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           sendToThread: (input) =>
-            Ref.update(harness.sends, (all) => [...all, input]).pipe(Effect.as({} as never)),
+            Effect.gen(function* () {
+              if (yield* Ref.get(harness.threadArchived)) {
+                return yield* new ThreadManagementService.ThreadManagementThreadArchivedError({
+                  threadId: input.threadId,
+                });
+              }
+              yield* Ref.update(harness.sends, (all) => [...all, input]);
+              return {} as never;
+            }),
+          interruptThread: (input) =>
+            Ref.update(harness.interrupts, (all) => [...all, input.threadId]).pipe(
+              Effect.as({ type: "no_active_run" } as const),
+            ),
           getThreadRecords: () => Effect.succeed({ subagents: options.subagents ?? [] } as never),
+          getThreadShell: (threadId) =>
+            Ref.get(harness.threads).pipe(
+              Effect.map((threads) => {
+                const thread = threads.get(threadId);
+                return thread === undefined
+                  ? null
+                  : ({
+                      id: threadId,
+                      deletedAt: thread.deleted ? "2026-01-01T00:00:00.000Z" : null,
+                    } as unknown as OrchestrationV2ThreadShell);
+              }),
+            ),
         }),
-        Layer.mock(ProjectService.ProjectService)({}),
-        Layer.mock(ServerSettings.ServerSettingsService)({}),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: (id) =>
+            Effect.succeed(
+              id === projectId || id === bareProjectId
+                ? Option.some({
+                    id,
+                    workspaceRoot: "/projects/test",
+                    defaultModelSelection: id === projectId ? modelSelection : null,
+                  } as unknown as Project)
+                : Option.none(),
+            ),
+        }),
+        ServerSettings.layerTest(
+          options.defaultRuntimeMode === undefined
+            ? {}
+            : { defaultRuntimeMode: options.defaultRuntimeMode },
+        ),
         IdAllocator.layer,
       ),
     ),
   );
+};
 
 const withService = <A, E>(
   body: (
     service: CaptainService.CaptainService["Service"],
     harness: Harness,
-  ) => Effect.Effect<A, E>,
-  options?: Parameters<typeof makeLayer>[1],
+  ) => Effect.Effect<A, E, SqlClient.SqlClient | Scope.Scope>,
+  options: HarnessOptions = {},
 ) =>
   Effect.gen(function* () {
     const harness: Harness = {
       launches: yield* Ref.make<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>([]),
       sends: yield* Ref.make<ReadonlyArray<ThreadManagementService.ThreadManagementSendInput>>([]),
+      interrupts: yield* Ref.make<ReadonlyArray<ThreadId>>([]),
+      threads: yield* Ref.make<ReadonlyMap<ThreadId, { readonly deleted: boolean }>>(new Map()),
+      threadArchived: yield* Ref.make(false),
     };
     return yield* Effect.gen(function* () {
       const service = yield* CaptainService.CaptainService;
@@ -97,50 +176,138 @@ const withService = <A, E>(
   }).pipe(Effect.provide(SqlitePersistence.layerMemory));
 
 const createCaptain = (service: CaptainService.CaptainService["Service"], name = "Docs") =>
-  service.create({
-    projectId,
-    name,
-    charter: "Keep the user docs accurate.",
-    modelSelection,
-    createdBy: "user",
-    creationSource: "web",
-  });
+  service.create({ projectId, name, charter: "Keep the user docs accurate.", ...fromUser });
 
-it.effect("create saves the captain before launching its thread with the briefing", () =>
+const storedCaptainCount = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* sql<{ readonly total: number }>`SELECT COUNT(*) AS total FROM captains`;
+  return rows[0]?.total;
+});
+
+const raiseDecision = (
+  service: CaptainService.CaptainService["Service"],
+  threadId: ThreadId,
+  summary = "Ship v2 docs now?",
+) =>
+  service
+    .report(threadId, { needs: [{ kind: "decision", summary }] })
+    .pipe(Effect.map(({ raised }) => raised[0]!));
+
+it.effect("create launches the briefing with the project's default model and mode", () =>
+  withService(
+    (service, harness) =>
+      Effect.gen(function* () {
+        const { captain } = yield* createCaptain(service);
+        const [launch] = yield* Ref.get(harness.launches);
+        assert.strictEqual(launch?.threadId, captain.threadId);
+        assert.strictEqual(launch?.projectId, projectId);
+        assert.deepStrictEqual(launch?.modelSelection, modelSelection);
+        assert.strictEqual(launch?.runtimeMode, "approval-required");
+        assert.deepStrictEqual(launch?.workspaceStrategy, { type: "root" });
+        assert.include(launch?.initialMessage?.text ?? "", "Keep the user docs accurate.");
+        assert.include(launch?.initialMessage?.text ?? "", captain.id);
+        assert.include(launch?.initialMessage?.text ?? "", "captain_report");
+        assert.strictEqual(captain.status, "active");
+        assert.deepStrictEqual(captain.openNeeds, []);
+
+        const { captains } = yield* service.list({ projectId });
+        assert.deepStrictEqual(
+          captains.map((listed) => listed.id),
+          [captain.id],
+        );
+        const other = yield* service.list({ projectId: ProjectId.make("project:other") });
+        assert.deepStrictEqual(other.captains, []);
+      }),
+    { defaultRuntimeMode: "approval-required" },
+  ),
+);
+
+it.effect("create refuses a project it cannot find or that has no default model", () =>
   withService((service, harness) =>
     Effect.gen(function* () {
-      const { captain } = yield* createCaptain(service);
-      const [launch] = yield* Ref.get(harness.launches);
-      assert.strictEqual(launch?.threadId, captain.threadId);
-      assert.strictEqual(launch?.projectId, projectId);
-      assert.deepStrictEqual(launch?.workspaceStrategy, { type: "root" });
-      assert.include(launch?.initialMessage?.text ?? "", "Keep the user docs accurate.");
-      assert.include(launch?.initialMessage?.text ?? "", captain.id);
-      assert.include(launch?.initialMessage?.text ?? "", "captain_report");
-      assert.strictEqual(captain.status, "active");
-      assert.deepStrictEqual(captain.openNeeds, []);
-
-      const { captains } = yield* service.list({ projectId });
-      assert.deepStrictEqual(
-        captains.map((listed) => listed.id),
-        [captain.id],
+      const request = { name: "Docs", charter: "Keep docs accurate.", ...fromUser };
+      const missing = yield* Effect.exit(
+        service.create({ ...request, projectId: ProjectId.make("project:missing") }),
       );
-      const other = yield* service.list({ projectId: ProjectId.make("project:other") });
-      assert.deepStrictEqual(other.captains, []);
+      assert.strictEqual(failureOf(missing).code, "not_found");
+      const bare = yield* Effect.exit(service.create({ ...request, projectId: bareProjectId }));
+      assert.strictEqual(failureOf(bare).code, "invalid_request");
+      assert.include(failureOf(bare).message, "no default model");
+      assert.lengthOf(yield* Ref.get(harness.launches), 0);
+      assert.strictEqual(yield* storedCaptainCount, 0);
     }),
   ),
 );
 
-it.effect("create removes the captain when its thread cannot start", () =>
+it.effect("create removes the captain when its thread never started", () =>
   withService(
     (service) =>
       Effect.gen(function* () {
         const exit = yield* Effect.exit(createCaptain(service));
         assert.strictEqual(failureOf(exit).code, "unavailable");
-        const { captains } = yield* service.list({});
-        assert.deepStrictEqual(captains, []);
+        assert.strictEqual(yield* storedCaptainCount, 0);
       }),
-    { launchFails: true },
+    { launch: "fails-before-thread" },
+  ),
+);
+
+it.effect("create keeps the captain when the launch fails after its thread started", () =>
+  withService(
+    (service) =>
+      Effect.gen(function* () {
+        const { captain } = yield* createCaptain(service);
+        assert.strictEqual(yield* storedCaptainCount, 1);
+        // The running thread can still report as this captain.
+        const reported = yield* service.report(captain.threadId, { plan: "1. Audit docs" });
+        assert.strictEqual(reported.captain.plan, "1. Audit docs");
+      }),
+    { launch: "fails-after-thread" },
+  ),
+);
+
+it.effect("create says what to change when a managed mode limit refuses the launch", () =>
+  withService(
+    (service) =>
+      Effect.gen(function* () {
+        const error = failureOf(yield* Effect.exit(createCaptain(service)));
+        assert.strictEqual(error.code, "invalid_request");
+        assert.include(error.message, "Example Corp");
+        assert.include(error.message, "approval-required");
+      }),
+    { launch: "above-ceiling" },
+  ),
+);
+
+it.effect("a captain whose thread was deleted leaves the list until the thread returns", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain } = yield* createCaptain(service);
+      const setDeleted = (deleted: boolean) =>
+        Ref.update(harness.threads, (threads) =>
+          new Map(threads).set(captain.threadId, { deleted }),
+        );
+      yield* setDeleted(true);
+      assert.deepStrictEqual((yield* service.list({})).captains, []);
+      yield* setDeleted(false);
+      assert.lengthOf((yield* service.list({})).captains, 1);
+    }),
+  ),
+);
+
+it.effect("the live list re-emits when a captain changes", () =>
+  withService((service) =>
+    Effect.gen(function* () {
+      const pull = yield* Stream.toPull(service.subscribeList({}));
+      assert.deepStrictEqual(
+        (yield* pull).map(({ captains }) => captains.length),
+        [0],
+      );
+      const { captain } = yield* createCaptain(service);
+      assert.deepStrictEqual(
+        (yield* pull).map(({ captains }) => captains.map((listed) => listed.id)),
+        [[captain.id]],
+      );
+    }),
   ),
 );
 
@@ -196,80 +363,183 @@ it.effect("report saves the plan and raises needs only from the captain's own th
   ),
 );
 
-it.effect("resolving a need answers the captain once", () =>
+it.effect("resolving a need answers the captain once, even when two answers race", () =>
   withService((service, harness) =>
     Effect.gen(function* () {
       const { captain } = yield* createCaptain(service);
-      const { raised } = yield* service.report(captain.threadId, {
-        needs: [{ kind: "decision", summary: "Ship v2 docs now?" }],
-      });
-      const need = raised[0]!;
+      const need = yield* raiseDecision(service, captain.threadId);
+      const resolve = (resolution: string) =>
+        Effect.exit(service.resolveNeed({ needId: need.id, resolution, ...fromUser }));
 
-      const resolved = yield* service.resolveNeed({
-        needId: need.id,
-        resolution: "Yes, ship them today.",
-        createdBy: "user",
-        creationSource: "web",
+      const exits = yield* Effect.all([resolve("Yes, ship them today."), resolve("No, wait.")], {
+        concurrency: 2,
       });
+      const won = exits.filter(Exit.isSuccess);
+      assert.lengthOf(won, 1);
+      const lost = exits.find(Exit.isFailure)!;
+      assert.strictEqual(failureOf(lost).code, "invalid_request");
+
+      const resolved = won[0]!.value;
       assert.strictEqual(resolved.need.status, "resolved");
-      assert.strictEqual(resolved.need.resolution, "Yes, ship them today.");
       assert.deepStrictEqual(resolved.captain.openNeeds, []);
 
-      const again = yield* Effect.exit(
-        service.resolveNeed({
-          needId: need.id,
-          resolution: "No, wait.",
-          createdBy: "user",
-          creationSource: "web",
-        }),
-      );
-      assert.strictEqual(failureOf(again).code, "invalid_request");
-
+      // The loser was stopped by the claim, so the captain got the winner's answer and no other.
       const sends = yield* Ref.get(harness.sends);
       assert.lengthOf(sends, 1);
       assert.strictEqual(sends[0]?.threadId, captain.threadId);
       assert.strictEqual(sends[0]?.mode, "queue");
       assert.include(sends[0]?.text ?? "", "Ship v2 docs now?");
-      assert.include(sends[0]?.text ?? "", "Yes, ship them today.");
+      assert.include(sends[0]?.text ?? "", resolved.need.resolution ?? "<none>");
+      assert.include(sends[0]?.text ?? "", "resolved by the user");
 
+      assert.strictEqual(failureOf(yield* resolve("Again.")).code, "invalid_request");
       const missing = yield* Effect.exit(
         service.resolveNeed({
           needId: CaptainNeedId.make("need:missing"),
           resolution: "x",
-          createdBy: "user",
-          creationSource: "web",
+          ...fromUser,
         }),
       );
       assert.strictEqual(failureOf(missing).code, "not_found");
+      assert.lengthOf(yield* Ref.get(harness.sends), 1);
     }),
   ),
 );
 
-it.effect("a retired captain refuses work until it is reactivated", () =>
+it.effect("an answer that cannot be delivered leaves the need open to answer again", () =>
   withService((service, harness) =>
     Effect.gen(function* () {
       const { captain } = yield* createCaptain(service);
-      const retired = yield* service.setStatus({ captainId: captain.id, status: "retired" });
-      assert.strictEqual(retired.captain.status, "retired");
+      const need = yield* raiseDecision(service, captain.threadId);
+      const resolve = service.resolveNeed({ needId: need.id, resolution: "Yes.", ...fromUser });
 
-      const message = {
+      yield* Ref.set(harness.threadArchived, true);
+      const error = failureOf(yield* Effect.exit(resolve));
+      assert.strictEqual(error.code, "invalid_request");
+      assert.include(error.message, "archived");
+      const { captains } = yield* service.list({});
+      assert.deepStrictEqual(
+        captains[0]?.openNeeds.map((open) => [open.id, open.status, open.resolution]),
+        [[need.id, "open", null]],
+      );
+
+      yield* Ref.set(harness.threadArchived, false);
+      const resolved = yield* resolve;
+      assert.strictEqual(resolved.need.resolution, "Yes.");
+      assert.lengthOf(yield* Ref.get(harness.sends), 1);
+    }),
+  ),
+);
+
+it.effect("an agent's relay is labeled, and a captain cannot answer its own need", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain } = yield* createCaptain(service);
+      const need = yield* raiseDecision(service, captain.threadId);
+      const fromAgent = { createdBy: "agent", creationSource: "mcp" } as const;
+
+      const own = yield* Effect.exit(
+        service.resolveNeed({
+          needId: need.id,
+          resolution: "Yes.",
+          ...fromAgent,
+          senderThreadId: captain.threadId,
+        }),
+      );
+      assert.strictEqual(failureOf(own).code, "invalid_request");
+      assert.lengthOf(yield* Ref.get(harness.sends), 0);
+
+      const relay = ThreadId.make("thread:helper");
+      yield* service.resolveNeed({
+        needId: need.id,
+        resolution: "Yes.",
+        ...fromAgent,
+        senderThreadId: relay,
+      });
+      yield* service.message({
         captainId: captain.id,
         text: "Status?",
-        createdBy: "user",
-        creationSource: "web",
-      } as const;
+        ...fromAgent,
+        senderThreadId: relay,
+      });
+      const sends = yield* Ref.get(harness.sends);
+      assert.deepStrictEqual(
+        sends.map((send) => [send.createdBy, send.senderThreadId]),
+        [
+          ["agent", relay],
+          ["agent", relay],
+        ],
+      );
+      assert.include(sends[0]?.text ?? "", "resolved by an agent");
+      assert.include(sends[1]?.text ?? "", "Message from an agent");
+      assert.strictEqual(yield* service.threadIdOf({ needId: need.id }), captain.threadId);
+      assert.strictEqual(yield* service.threadIdOf({ captainId: captain.id }), captain.threadId);
+    }),
+  ),
+);
+
+it.effect("retiring stops the captain, tells it once, and holds its needs until reactivated", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain } = yield* createCaptain(service);
+      const need = yield* raiseDecision(service, captain.threadId);
+      const retire = service.setStatus({ captainId: captain.id, status: "retired", ...fromUser });
+
+      const retired = yield* retire;
+      assert.strictEqual(retired.captain.status, "retired");
+      assert.deepStrictEqual(retired.captain.openNeeds, []);
+      yield* retire;
+      assert.deepStrictEqual(yield* Ref.get(harness.interrupts), [captain.threadId]);
+      const notices = yield* Ref.get(harness.sends);
+      assert.lengthOf(notices, 1);
+      assert.include(notices[0]?.text ?? "", "retired you");
+
+      const message = { captainId: captain.id, text: "Status?", ...fromUser } as const;
       assert.strictEqual(failureOf(yield* Effect.exit(service.message(message))).code, "retired");
       assert.strictEqual(
         failureOf(yield* Effect.exit(service.report(captain.threadId, { plan: "x" }))).code,
         "retired",
       );
-      assert.lengthOf(yield* Ref.get(harness.sends), 0);
+      assert.strictEqual(
+        failureOf(
+          yield* Effect.exit(
+            service.resolveNeed({ needId: need.id, resolution: "Yes.", ...fromUser }),
+          ),
+        ).code,
+        "retired",
+      );
+      assert.lengthOf(yield* Ref.get(harness.sends), 1);
 
-      yield* service.setStatus({ captainId: captain.id, status: "active" });
+      const reactivated = yield* service.setStatus({
+        captainId: captain.id,
+        status: "active",
+        ...fromUser,
+      });
+      assert.deepStrictEqual(
+        reactivated.captain.openNeeds.map((open) => open.id),
+        [need.id],
+      );
       yield* service.message(message);
       const sends = yield* Ref.get(harness.sends);
-      assert.lengthOf(sends, 1);
-      assert.include(sends[0]?.text ?? "", "Status?");
+      assert.lengthOf(sends, 3);
+      assert.include(sends[1]?.text ?? "", "reactivated you");
+      assert.include(sends[2]?.text ?? "", "Status?");
+      assert.lengthOf(yield* Ref.get(harness.interrupts), 1);
+    }),
+  ),
+);
+
+it.effect("retiring succeeds even when the captain's thread cannot be reached", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain } = yield* createCaptain(service);
+      yield* Ref.set(harness.threadArchived, true);
+      const retired = yield* service.setStatus({
+        captainId: captain.id,
+        status: "retired",
+        ...fromUser,
+      });
+      assert.strictEqual(retired.captain.status, "retired");
     }),
   ),
 );

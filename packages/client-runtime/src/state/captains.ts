@@ -47,6 +47,10 @@ export function createCaptainEnvironmentAtoms<R, E>(
     setStatus: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:captains:set-status",
       tag: WS_METHODS.captainsSetStatus,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.captainId]),
+      },
     }),
   };
 }

@@ -77,7 +77,7 @@ function CaptainEnvironmentSection({
     projects.find((project) => project.id === projectId)?.title ?? projectId;
   const captains = query.data?.captains ?? [];
   const openNeeds = captains.flatMap((captain) =>
-    captain.status === "active" ? captain.openNeeds.map((need) => ({ need, captain })) : [],
+    captain.openNeeds.map((need) => ({ need, captain })),
   );
 
   return (
@@ -112,14 +112,20 @@ function CaptainEnvironmentSection({
           </div>
           <div className="flex flex-col gap-3">
             <h3 className="font-medium text-sm">Fleet ({captains.length})</h3>
-            {captains.map((captain) => (
-              <CaptainCard
-                key={captain.id}
-                environmentId={environmentId}
-                captain={captain}
-                projectTitle={projectTitle(captain.projectId)}
-              />
-            ))}
+            {captains.length === 0 ? (
+              <p className="text-muted-foreground text-sm">
+                No captains yet. Start one below to hand it an area of a project.
+              </p>
+            ) : (
+              captains.map((captain) => (
+                <CaptainCard
+                  key={captain.id}
+                  environmentId={environmentId}
+                  captain={captain}
+                  projectTitle={projectTitle(captain.projectId)}
+                />
+              ))
+            )}
           </div>
           <NewCaptainForm
             environmentId={environmentId}
@@ -146,7 +152,7 @@ function NeedCard({
   const resolve = useAtomCommand(captainEnvironment.resolveNeed, { label: "resolve need" });
   const submit = async () => {
     const text = resolution.trim();
-    if (text.length === 0) return;
+    if (!canOperate || pending || text.length === 0) return;
     setPending(true);
     const result = await resolve({ environmentId, input: { needId: need.id, resolution: text } });
     setPending(false);
@@ -169,6 +175,7 @@ function NeedCard({
         placeholder="Your answer or decision"
         value={resolution}
         maxLength={CAPTAIN_MESSAGE_MAX_LENGTH}
+        disabled={!canOperate || pending}
         onChange={(event) => setResolution(event.target.value)}
       />
       <div className="flex justify-end">
@@ -196,7 +203,10 @@ function CaptainCard({
   const navigate = useNavigate();
   const [expanded, setExpanded] = useState(false);
   const [message, setMessage] = useState("");
-  const canOperate = useAtomValue(captainEnvironment.message.permissionAtom(environmentId));
+  const [sending, setSending] = useState(false);
+  const [statusPending, setStatusPending] = useState(false);
+  const canMessage = useAtomValue(captainEnvironment.message.permissionAtom(environmentId));
+  const canSetStatus = useAtomValue(captainEnvironment.setStatus.permissionAtom(environmentId));
   const send = useAtomCommand(captainEnvironment.message, { label: "message captain" });
   const setStatus = useAtomCommand(captainEnvironment.setStatus, { label: "update captain" });
   const digest = useEnvironmentQuery(
@@ -207,9 +217,20 @@ function CaptainCard({
   const retired = captain.status === "retired";
   const submitMessage = async () => {
     const text = message.trim();
-    if (text.length === 0) return;
+    if (!canMessage || sending || text.length === 0) return;
+    setSending(true);
     const result = await send({ environmentId, input: { captainId: captain.id, text } });
+    setSending(false);
     if (result._tag === "Success") setMessage("");
+  };
+  const toggleStatus = async () => {
+    if (!canSetStatus || statusPending) return;
+    setStatusPending(true);
+    await setStatus({
+      environmentId,
+      input: { captainId: captain.id, status: retired ? "active" : "retired" },
+    });
+    setStatusPending(false);
   };
 
   return (
@@ -237,13 +258,8 @@ function CaptainCard({
         <Button
           size="sm"
           variant="outline"
-          disabled={!canOperate}
-          onClick={() =>
-            void setStatus({
-              environmentId,
-              input: { captainId: captain.id, status: retired ? "active" : "retired" },
-            })
-          }
+          disabled={!canSetStatus || statusPending}
+          onClick={() => void toggleStatus()}
         >
           {retired ? "Reactivate" : "Retire"}
         </Button>
@@ -283,15 +299,17 @@ function CaptainCard({
             placeholder="Message this captain"
             value={message}
             maxLength={CAPTAIN_MESSAGE_MAX_LENGTH}
+            disabled={!canMessage || sending}
             onChange={(event) => setMessage(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") void submitMessage();
+              // Enter that confirms an IME composition is not a send.
+              if (event.key === "Enter" && !event.nativeEvent.isComposing) void submitMessage();
             }}
           />
           <Button
             size="sm"
             variant="outline"
-            disabled={!canOperate || message.trim().length === 0}
+            disabled={!canMessage || sending || message.trim().length === 0}
             onClick={() => void submitMessage()}
           >
             Send
@@ -319,7 +337,7 @@ function NewCaptainForm({
   const ready =
     selectedProject !== undefined && name.trim().length > 0 && charter.trim().length > 0;
   const submit = async () => {
-    if (!ready) return;
+    if (!canOperate || pending || !ready) return;
     setPending(true);
     const result = await create({
       environmentId,
@@ -364,6 +382,7 @@ function NewCaptainForm({
         placeholder="Name, such as Docs or Release"
         value={name}
         maxLength={CAPTAIN_NAME_MAX_LENGTH}
+        disabled={!canOperate || pending}
         onChange={(event) => setName(event.target.value)}
       />
       <Textarea
@@ -371,6 +390,7 @@ function NewCaptainForm({
         placeholder="What this captain owns and the outcome it works toward"
         value={charter}
         maxLength={CAPTAIN_CHARTER_MAX_LENGTH}
+        disabled={!canOperate || pending}
         onChange={(event) => setCharter(event.target.value)}
       />
       <div className="flex justify-end">

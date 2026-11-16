@@ -2338,7 +2338,8 @@ export const layerWsRpc = (
           captains.message({ ...input, createdBy: "user", creationSource: "web" }),
         [WS_METHODS.captainsResolveNeed]: (input) =>
           captains.resolveNeed({ ...input, createdBy: "user", creationSource: "web" }),
-        [WS_METHODS.captainsSetStatus]: (input) => captains.setStatus(input),
+        [WS_METHODS.captainsSetStatus]: (input) =>
+          captains.setStatus({ ...input, createdBy: "user", creationSource: "web" }),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
         [WS_METHODS.serverGetConfig]: (_input) =>
           loadServerConfig({

@@ -39,7 +39,8 @@ const CaptainCreateTool = Tool.make("captain_create", {
 })
   .annotate(Tool.Title, "Start a captain")
   .annotate(Tool.Destructive, false)
-  .annotate(Tool.OpenWorld, true);
+  .annotate(Tool.OpenWorld, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromSubagents);
 
 const CaptainListTool = Tool.make("captain_list", {
   ...shared,
@@ -60,22 +61,25 @@ const CaptainListTool = Tool.make("captain_list", {
 
 const CaptainMessageTool = Tool.make("captain_message", {
   ...shared,
-  description: "Send the user's instruction to a captain. It is queued as the captain's next turn.",
+  description:
+    "Relay the user's instruction to a captain. It is queued as the captain's next turn, marked as relayed by an agent.",
   parameters: CaptainMessageInput,
   success: CaptainMutationResult,
 })
   .annotate(Tool.Title, "Message a captain")
-  .annotate(Tool.Destructive, false);
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromSubagents);
 
 const CaptainResolveNeedTool = Tool.make("captain_resolve_need", {
   ...shared,
   description:
-    "Resolve a captain's open need with the user's answer. The captain receives `resolution` as a message. Only with the user's actual answer.",
+    "Resolve a captain's open need with the user's actual answer, never your own. The captain receives `resolution` as a message marked as relayed by an agent.",
   parameters: CaptainResolveNeedInput,
   success: CaptainResolveNeedResult,
 })
   .annotate(Tool.Title, "Resolve a captain's need")
-  .annotate(Tool.Destructive, false);
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromSubagents);
 
 const CaptainReportTool = Tool.make("captain_report", {
   ...shared,

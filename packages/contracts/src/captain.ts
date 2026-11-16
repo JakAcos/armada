@@ -185,3 +185,5 @@ export class CaptainError extends Schema.TaggedError<CaptainError>()("CaptainErr
   message: Schema.String,
   cause: Schema.optional(Schema.Defect()),
 }) {}
+
+export const isCaptainError = Schema.is(CaptainError);

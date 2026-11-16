@@ -19,7 +19,7 @@ export default Effect.gen(function* () {
     )
   `;
   yield* sql`
-    CREATE INDEX IF NOT EXISTS idx_captains_project ON captains(project_id, updated_at)
+    CREATE INDEX IF NOT EXISTS idx_captains_project ON captains(project_id, created_at, captain_id)
   `;
   yield* sql`
     CREATE TABLE IF NOT EXISTS captain_needs (

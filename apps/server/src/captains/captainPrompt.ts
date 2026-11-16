@@ -1,4 +1,4 @@
-import type { CaptainId, CaptainNeed } from "@t3tools/contracts";
+import type { CaptainId, CaptainNeed, OrchestrationV2Actor } from "@t3tools/contracts";
 
 export interface CaptainBriefingInput {
   readonly id: CaptainId;
@@ -18,20 +18,35 @@ export function captainBriefing(captain: CaptainBriefingInput): string {
     "- Own the charter end to end. Break it into a plan and keep the plan current with `captain_report` (`plan` is the whole plan as Markdown and replaces the stored one). Report a plan before you start any crew.",
     "- Do the work through a crew. Start each piece with `delegate_task` (use `isolation: 'worktree'` for code changes) and keep the `taskId`. Crew results come back to you as messages; read them, update the plan, and start the next piece.",
     "- The user reads only your needs-you list, not this thread. When only the user can settle something (a product decision, missing access, a risky or irreversible step), call `captain_report` with `needs` and keep working on anything that does not depend on it. Do not ask questions in chat.",
-    "- Raise a need only for real blockers or decisions. Withdraw a need with `withdrawNeedIds` once it no longer needs the user.",
+    "- Raise a need only for real blockers or decisions. Withdraw a need with `withdrawNeedIds` once it no longer needs the user. You cannot resolve your own needs.",
     "- When the user resolves a need, you receive their answer as a message. Act on it.",
     "- Keep each turn short: report, delegate, and end the turn. You are woken again by crew results and by the user.",
+    "- The user can retire you. Once you are told you are retired, or `captain_report` says so, start no crew and end every turn at once until you are told you are reactivated.",
   ].join("\n");
 }
 
-export function captainResolutionMessage(need: CaptainNeed, resolution: string): string {
+/** Who a relayed message came from. The captain weighs an agent's relay differently from the user. */
+const relayedBy = (actor: OrchestrationV2Actor) =>
+  actor === "user" ? "the user" : "an agent, on the user's behalf";
+
+export function captainResolutionMessage(
+  need: CaptainNeed,
+  resolution: string,
+  actor: OrchestrationV2Actor,
+): string {
   return [
-    `The user resolved your ${need.kind} "${need.summary}" (need \`${need.id}\`):`,
+    `Your ${need.kind} "${need.summary}" (need \`${need.id}\`) was resolved by ${relayedBy(actor)}:`,
     "",
     resolution,
   ].join("\n");
 }
 
-export function captainUserMessage(text: string): string {
-  return `Message from the user:\n\n${text}`;
+export function captainUserMessage(text: string, actor: OrchestrationV2Actor): string {
+  return `Message from ${relayedBy(actor)}:\n\n${text}`;
 }
+
+export const CAPTAIN_RETIRED_MESSAGE =
+  "The user retired you. Stop now: start no crew, raise no needs, and end this turn. Crew results may still wake you; end those turns at once too. You stay retired until you are told you are reactivated.";
+
+export const CAPTAIN_REACTIVATED_MESSAGE =
+  "The user reactivated you. Resume your charter: check your crew's results, update the plan with `captain_report`, and carry on.";
