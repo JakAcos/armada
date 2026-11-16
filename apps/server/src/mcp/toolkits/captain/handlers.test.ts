@@ -128,6 +128,7 @@ const callAll = Effect.gen(function* () {
       projectId,
       name: "Docs",
       charter: "Keep the docs accurate.",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
     }),
     list: yield* result("captain_list", {}),
     message: yield* result("captain_message", { captainId, text: "Status?" }),
@@ -150,6 +151,7 @@ it.effect("a caller below the captain thread's mode cannot message it or answer 
       createdBy: "agent",
       creationSource: "mcp",
       runtimeMode: "approval-required",
+      modelSelection: { instanceId: "codex", model: "gpt-5" },
     });
   }),
 );

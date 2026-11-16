@@ -3,6 +3,7 @@ import {
   CaptainNeedId,
   type CaptainError,
   type CommandId,
+  DEFAULT_SERVER_SETTINGS,
   type OrchestrationV2ThreadShell,
   type Project,
   ProjectId,
@@ -10,6 +11,7 @@ import {
   type RuntimeMode,
   ThreadId,
   isCaptainError,
+  resolveProjectProviderInstanceEnabled,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Deferred from "effect/Deferred";
@@ -109,6 +111,19 @@ const makeLayer = (harness: Harness, options: HarnessOptions) => {
             Effect.gen(function* () {
               yield* Ref.update(harness.launches, (all) => [...all, input]);
               const threadId = input.threadId!;
+              // The real launch's first check, which refuses an unknown instance id as disabled.
+              const { instanceId } = input.modelSelection;
+              if (
+                !resolveProjectProviderInstanceEnabled(
+                  DEFAULT_SERVER_SETTINGS,
+                  input.projectId,
+                  instanceId,
+                )
+              ) {
+                return yield* new ThreadManagementService.ThreadManagementProviderInstanceDisabledError(
+                  { projectId: input.projectId, instanceId },
+                );
+              }
               if (outcome === "fails-before-thread" || outcome === "above-ceiling") {
                 return yield* new ThreadLaunchService.ThreadLaunchError({
                   operation: "create-thread",
@@ -291,12 +306,24 @@ it.effect("create launches the briefing with the project's default model and mod
         );
         const other = yield* service.list({ projectId: ProjectId.make("project:other") });
         assert.deepStrictEqual(other.captains, []);
+
+        // A picked model wins, and needs no project default.
+        const picked = { instanceId: modelSelection.instanceId, model: "gpt-5-mini" };
+        yield* service.create({
+          projectId: bareProjectId,
+          name: "Release",
+          charter: "Ship releases.",
+          modelSelection: picked,
+          ...fromUser,
+        });
+        const [, pickedLaunch] = yield* Ref.get(harness.launches);
+        assert.deepStrictEqual(pickedLaunch?.modelSelection, picked);
       }),
     { defaultRuntimeMode: "approval-required" },
   ),
 );
 
-it.effect("create refuses a project it cannot find or that has no default model", () =>
+it.effect("create refuses a missing project, no model, or a provider it cannot use", () =>
   withService((service, harness) =>
     Effect.gen(function* () {
       const request = { name: "Docs", charter: "Keep docs accurate.", ...fromUser };
@@ -306,8 +333,21 @@ it.effect("create refuses a project it cannot find or that has no default model"
       assert.strictEqual(failureOf(missing).code, "not_found");
       const bare = yield* Effect.exit(service.create({ ...request, projectId: bareProjectId }));
       assert.strictEqual(failureOf(bare).code, "invalid_request");
-      assert.include(failureOf(bare).message, "Project Bare has no default model");
+      assert.include(failureOf(bare).message, "Project Bare has no default model. Pick a model");
       assert.lengthOf(yield* Ref.get(harness.launches), 0);
+
+      const unknownProvider = failureOf(
+        yield* Effect.exit(
+          service.create({
+            ...request,
+            projectId: bareProjectId,
+            modelSelection: { instanceId: ProviderInstanceId.make("no_such_provider"), model: "x" },
+          }),
+        ),
+      );
+      assert.strictEqual(unknownProvider.code, "invalid_request");
+      assert.include(unknownProvider.message, `Provider "no_such_provider"`);
+      assert.include(unknownProvider.message, "Pick another model");
       assert.strictEqual(yield* storedCaptainCount, 0);
     }),
   ),
