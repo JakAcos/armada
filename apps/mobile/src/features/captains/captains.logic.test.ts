@@ -16,7 +16,6 @@ import {
   captainStartForm,
   captainsInProjects,
   collectOpenNeeds,
-  nextCaptainStatus,
 } from "./captains.logic";
 
 const at = "2026-11-16T00:00:00.000Z";
@@ -73,13 +72,6 @@ describe("collectOpenNeeds", () => {
       ),
     ).toEqual(["n2"]);
     expect(captainsInProjects(fleet, null)).toBe(fleet);
-  });
-});
-
-describe("nextCaptainStatus", () => {
-  it("retires an active captain and reactivates a retired one", () => {
-    expect(nextCaptainStatus("active")).toBe("retired");
-    expect(nextCaptainStatus("retired")).toBe("active");
   });
 });
 

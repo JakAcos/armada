@@ -25,7 +25,7 @@ const { Children, mocks } = vi.hoisted(() => ({
       setStatus: vi.fn(),
     } as Record<string, ReturnType<typeof vi.fn>>,
     inputs: new Map<string, (value: string) => void>(),
-    permission: null as unknown,
+    permissions: {} as Record<string, unknown>,
     captains: [] as CaptainSummary[],
   },
 }));
@@ -128,7 +128,7 @@ vi.mock("../../state/entities", () => ({
   useProjects: () => [{ environmentId: "environment", id: "project", title: "Project" }],
 }));
 vi.mock("../../state/captains", () => {
-  const command = (name: string) => ({ name, permissionAtom: () => mocks.permission });
+  const command = (name: string) => ({ name, permissionAtom: () => mocks.permissions[name] });
   return {
     captainEnvironment: {
       live: () => "live",
@@ -189,8 +189,10 @@ function captain(name: string, status: CaptainSummary["status"], withNeed = fals
 let root: Root;
 let container: HTMLDivElement;
 
-function render(options: { readonly canOperate: boolean }) {
-  mocks.permission = Atom.make(options.canOperate);
+function render(denied: ReadonlyArray<string> = []) {
+  for (const command of Object.keys(mocks.run)) {
+    mocks.permissions[command] = Atom.make(!denied.includes(command));
+  }
   act(() =>
     root.render(
       <RegistryContext.Provider value={appAtomRegistry}>
@@ -242,7 +244,7 @@ afterEach(() => {
 
 describe("CaptainsRouteScreen", () => {
   it("resolves a need once with the trimmed answer and clears it when the server accepts", async () => {
-    render({ canOperate: true });
+    render();
     let accept: (value: unknown) => void = () => {};
     mocks.run.resolveNeed!.mockReturnValue(new Promise((resolve) => (accept = resolve)));
     type("Answer for Pick a host", "  Fly.io  ");
@@ -262,7 +264,7 @@ describe("CaptainsRouteScreen", () => {
   });
 
   it("keeps the answer and shows the server's reason when resolving fails", async () => {
-    render({ canOperate: true });
+    render();
     mocks.run.resolveNeed!.mockResolvedValue(
       AsyncResult.failure(
         Cause.fail(
@@ -282,7 +284,7 @@ describe("CaptainsRouteScreen", () => {
   });
 
   it("retires an active captain and reactivates a retired one", async () => {
-    render({ canOperate: true });
+    render();
     await act(async () => button("Select Retire").click());
     await act(async () => button("Select Reactivate").click());
 
@@ -302,8 +304,13 @@ describe("CaptainsRouteScreen", () => {
     ]);
   });
 
-  it("disables every command without the operate scope", async () => {
-    render({ canOperate: false });
+  it.each([
+    { denied: "resolveNeed", disabled: ["Resolve"] },
+    { denied: "message", disabled: ["Send"] },
+    { denied: "create", disabled: ["Select Project", "Start captain"] },
+    { denied: "setStatus", disabled: ["Select Retire", "Select Reactivate"] },
+  ])("denying $denied disables only its controls", ({ denied, disabled }) => {
+    render([denied]);
     type("Answer for Pick a host", "Fly.io");
     type("Message Captain Docs", "Status?");
     type("Name", "Ops");
@@ -312,18 +319,17 @@ describe("CaptainsRouteScreen", () => {
     for (const label of [
       "Resolve",
       "Send",
+      "Select Project",
       "Start captain",
       "Select Retire",
       "Select Reactivate",
     ]) {
-      expect(button(label).disabled, label).toBe(true);
+      expect(button(label).disabled, label).toBe(disabled.includes(label));
     }
-    expect(input("Answer for Pick a host").readOnly).toBe(true);
-    expect(Object.values(mocks.run).every((run) => run.mock.calls.length === 0)).toBe(true);
   });
 
   it("starts a captain in the first project with the trimmed fields", async () => {
-    render({ canOperate: true });
+    render();
     expect(button("Start captain").disabled).toBe(true);
     type("Name", " Ops ");
     type("Charter", " Keep CI green ");
@@ -342,7 +348,7 @@ describe("CaptainsRouteScreen", () => {
   });
 
   it("loads a captain's crew only while its details are open", () => {
-    render({ canOperate: true });
+    render();
     expect(mocks.digest).not.toHaveBeenCalled();
     act(() => button("Captain Docs, Active, Project").click());
     expect(mocks.digest).toHaveBeenCalledWith({

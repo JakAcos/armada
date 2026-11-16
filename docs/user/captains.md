@@ -37,13 +37,15 @@ still open a captain's thread to watch it work or send it a message from its car
 
 ## Plan and crew
 
-Select **Details** on a captain, or tap the captain on mobile, to see its current plan and the status
-of each crew task. Crew tasks are ordinary child threads; open them from the captain's thread.
+Select **Details** on a captain, or tap the captain on mobile, to see its current plan and the
+status of each crew task. Crew tasks are ordinary child threads; open them from the captain's
+thread.
 
 ## Retire a captain
 
-Select **Retire** to stop a captain. On mobile it is in the captain's actions menu. Its current turn is stopped and it is told it is retired. A
-retired captain cannot receive messages or raise needs, and its open needs leave **Needs you**.
+Select **Retire** to stop a captain. On mobile it is in the captain's actions menu. Its current
+turn is stopped and it is told it is retired. A retired captain cannot receive messages or raise
+needs, and its open needs leave **Needs you**.
 Crew tasks that are already running finish on their own; stop one from its thread if you need to.
 A turn that was already queued for the captain, such as a crew result, can run before it reads the
 retirement notice.

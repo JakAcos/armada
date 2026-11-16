@@ -116,6 +116,7 @@ export function CaptainsRouteScreen() {
       <ScrollView
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
+        automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
         contentInsetAdjustmentBehavior="automatic"
         showsVerticalScrollIndicator={false}
         className="flex-1"
@@ -545,6 +546,8 @@ function StartCaptainForm({
             id: project.id,
             title: project.title,
             state: project.id === form.project?.id ? ("on" as const) : undefined,
+            // The menu opens whatever its trigger says, so the choices carry the disabled state.
+            attributes: { disabled: !canCreate || pending },
           }))}
           onPressAction={({ nativeEvent }) => {
             const picked = projects.find((project) => project.id === nativeEvent.event);
@@ -554,7 +557,6 @@ function StartCaptainForm({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`Project, ${form.project?.title ?? ""}`}
-            disabled={pending}
             className="min-h-14 flex-row items-center gap-3 px-4 py-3 active:opacity-70"
           >
             <Text textRole="body" className="text-foreground">
