@@ -54,6 +54,8 @@ import * as PreviewControlsHandlers from "./toolkits/previewControls/handlers.ts
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { ThemeToolkit } from "./toolkits/theme/tools.ts";
+import { CaptainToolkit } from "./toolkits/captain/tools.ts";
+import * as CaptainHandlers from "./toolkits/captain/handlers.ts";
 import * as ThemeHandlers from "./toolkits/theme/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
@@ -1277,6 +1279,8 @@ const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentHandlers.layer,
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));
 
+const layerCaptainToolkit = toolkitRegistration(CaptainToolkit, CaptainHandlers.layer);
+
 const layerThemeToolkit = toolkitRegistration(ThemeToolkit, ThemeHandlers.layer).pipe(
   Layer.provide(ThreadCommandExecutor.layer),
 );
@@ -1347,6 +1351,7 @@ export const layerTools = Layer.mergeAll(
   layerProjectRegistration,
   layerEnvironmentToolkit,
   layerThemeToolkit,
+  layerCaptainToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,

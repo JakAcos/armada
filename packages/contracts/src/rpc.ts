@@ -27,6 +27,19 @@ import {
   PeerLinkSummary,
 } from "./peerLink.ts";
 import {
+  CaptainCreateInput,
+  CaptainDigest,
+  CaptainDigestInput,
+  CaptainError,
+  CaptainListInput,
+  CaptainListResult,
+  CaptainMessageInput,
+  CaptainMutationResult,
+  CaptainResolveNeedInput,
+  CaptainResolveNeedResult,
+  CaptainSetStatusInput,
+} from "./captain.ts";
+import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
   ChatGptImportProfileInput,
@@ -562,6 +575,12 @@ export const WS_METHODS = {
   guestShareCreate: "guestShare.create",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
+  captainsSubscribe: "captains.subscribe",
+  captainsCreate: "captains.create",
+  captainsDigest: "captains.digest",
+  captainsMessage: "captains.message",
+  captainsResolveNeed: "captains.resolveNeed",
+  captainsSetStatus: "captains.setStatus",
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -2022,6 +2041,45 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
   stream: true,
 });
 
+const CaptainRpcError = Schema.Union([CaptainError, EnvironmentAuthorizationError]);
+
+const WsCaptainsSubscribeRpc = Rpc.make(WS_METHODS.captainsSubscribe, {
+  payload: CaptainListInput,
+  success: CaptainListResult,
+  error: CaptainRpcError,
+  stream: true,
+});
+
+const WsCaptainsCreateRpc = Rpc.make(WS_METHODS.captainsCreate, {
+  payload: CaptainCreateInput,
+  success: CaptainMutationResult,
+  error: CaptainRpcError,
+});
+
+const WsCaptainsDigestRpc = Rpc.make(WS_METHODS.captainsDigest, {
+  payload: CaptainDigestInput,
+  success: CaptainDigest,
+  error: CaptainRpcError,
+});
+
+const WsCaptainsMessageRpc = Rpc.make(WS_METHODS.captainsMessage, {
+  payload: CaptainMessageInput,
+  success: CaptainMutationResult,
+  error: CaptainRpcError,
+});
+
+const WsCaptainsResolveNeedRpc = Rpc.make(WS_METHODS.captainsResolveNeed, {
+  payload: CaptainResolveNeedInput,
+  success: CaptainResolveNeedResult,
+  error: CaptainRpcError,
+});
+
+const WsCaptainsSetStatusRpc = Rpc.make(WS_METHODS.captainsSetStatus, {
+  payload: CaptainSetStatusInput,
+  success: CaptainMutationResult,
+  error: CaptainRpcError,
+});
+
 const WsScheduledTasksSubscribeRpc = Rpc.make(WS_METHODS.scheduledTasksSubscribe, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -2181,6 +2239,12 @@ export const WsRpcGroup = RpcGroup.make(
   WsSecretsAnswerRequestRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
+  WsCaptainsSubscribeRpc,
+  WsCaptainsCreateRpc,
+  WsCaptainsDigestRpc,
+  WsCaptainsMessageRpc,
+  WsCaptainsResolveNeedRpc,
+  WsCaptainsSetStatusRpc,
   WsServerReportClientActivityRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,

@@ -247,6 +247,10 @@
       "types": "./src/state/peerLinks.ts",
       "default": "./src/state/peerLinks.ts"
     },
+    "./state/captains": {
+      "types": "./src/state/captains.ts",
+      "default": "./src/state/captains.ts"
+    },
     "./state/environmentHttpAuth": {
       "types": "./src/state/environmentHttpAuth.ts",
       "default": "./src/state/environmentHttpAuth.ts"

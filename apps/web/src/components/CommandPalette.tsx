@@ -58,6 +58,7 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BugIcon,
+  AnchorIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronRightIcon,
@@ -1696,6 +1697,17 @@ function OpenCommandPaletteDialog(props: {
     shortcutCommand: "usage.open",
     run: async () => {
       await navigate({ to: "/usage" });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:captains",
+    searchTerms: ["captains", "captain", "orchestrator", "fleet", "needs you", "blockers"],
+    title: "Open captains",
+    icon: <AnchorIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/captains" });
     },
   });
 

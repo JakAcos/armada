@@ -199,12 +199,22 @@ export const writesWithCapability = <P, A, E, R>(handle: (params: P) => Effect.E
 export const writesThreads = <P, A, E, R>(
   threads: (params: P) => ReadonlyArray<ThreadId | undefined>,
   handle: (params: P) => Effect.Effect<A, E, R>,
+) => writesResolvedThreads((params: P) => Effect.succeed(threads(params)), handle);
+
+/**
+ * `writesThreads` for a tool that names its thread indirectly, such as by the
+ * captain that runs in it. The lookup runs after the caller is checked, so a
+ * caller that may not write learns nothing from it.
+ */
+export const writesResolvedThreads = <P, A, E, R, E2, R2>(
+  threads: (params: P) => Effect.Effect<ReadonlyArray<ThreadId | undefined>, E2, R2>,
+  handle: (params: P) => Effect.Effect<A, E, R>,
 ) =>
   declare(
     (params: P) =>
       Effect.gen(function* () {
         const caller = yield* writingCaller;
-        for (const threadId of threads(params)) {
+        for (const threadId of yield* threads(params)) {
           if (threadId === undefined || threadId === caller.scope.thread?.threadId) continue;
           const target = yield* caller.threads
             .getThreadShell(threadId)
