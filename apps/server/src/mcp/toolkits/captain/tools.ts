@@ -34,7 +34,7 @@ const CaptainCreateTool = Tool.make("captain_create", {
   ...shared,
   description:
     "Start a Captain: a long-lived orchestrator thread that owns `charter` in one project, runs a crew of child tasks, and surfaces only blockers and decisions to the user. Only when the user asks for a captain.",
-  parameters: CaptainCreateInput.mapFields(Struct.omit(["modelSelection"])),
+  parameters: CaptainCreateInput.mapFields(Struct.omit(["modelSelection", "creationSource"])),
   success: CaptainMutationResult,
 })
   .annotate(Tool.Title, "Start a captain")
@@ -63,7 +63,7 @@ const CaptainMessageTool = Tool.make("captain_message", {
   ...shared,
   description:
     "Relay the user's instruction to a captain. It is queued as the captain's next turn, marked as relayed by an agent.",
-  parameters: CaptainMessageInput,
+  parameters: CaptainMessageInput.mapFields(Struct.omit(["creationSource"])),
   success: CaptainMutationResult,
 })
   .annotate(Tool.Title, "Message a captain")
@@ -74,7 +74,7 @@ const CaptainResolveNeedTool = Tool.make("captain_resolve_need", {
   ...shared,
   description:
     "Resolve a captain's open need with the user's actual answer, never your own. The captain receives `resolution` as a message marked as relayed by an agent.",
-  parameters: CaptainResolveNeedInput,
+  parameters: CaptainResolveNeedInput.mapFields(Struct.omit(["creationSource"])),
   success: CaptainResolveNeedResult,
 })
   .annotate(Tool.Title, "Resolve a captain's need")

@@ -65,7 +65,8 @@ export interface CaptainProvenance {
   readonly senderThreadId?: ThreadId;
 }
 
-export interface CaptainCreateRequest extends CaptainCreateInput, CaptainProvenance {
+export interface CaptainCreateRequest
+  extends Omit<CaptainCreateInput, "creationSource">, CaptainProvenance {
   /** Modes the captain's thread runs at; MCP callers pass their own so a captain never exceeds them. */
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: ProviderInteractionMode;
