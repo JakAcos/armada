@@ -64,6 +64,8 @@ interface Harness {
   readonly interruptGate: Ref.Ref<Gate | undefined>;
   /** When set, a send signals `reached` and then waits for `release` before it is accepted. */
   readonly sendGate: Ref.Ref<Gate | undefined>;
+  /** When set, the next thread shell read signals `reached` and then waits for `release`. */
+  readonly shellGate: Ref.Ref<Gate | undefined>;
 }
 
 interface Gate {
@@ -168,6 +170,12 @@ const makeLayer = (harness: Harness, options: HarnessOptions) => {
           getThreadRecords: () => Effect.succeed({ subagents: options.subagents ?? [] } as never),
           getThreadShell: (threadId) =>
             Effect.gen(function* () {
+              // Only the first read waits, so a second caller is held back by nothing but a lock.
+              const gate = yield* Ref.getAndSet(harness.shellGate, undefined);
+              if (gate !== undefined) {
+                yield* Deferred.succeed(gate.reached, undefined);
+                yield* Deferred.await(gate.release);
+              }
               if (yield* Ref.get(harness.threadsUnreadable)) {
                 return yield* Effect.fail("projection unavailable" as never);
               }
@@ -196,6 +204,7 @@ const makeLayer = (harness: Harness, options: HarnessOptions) => {
               id === projectId || id === bareProjectId
                 ? Option.some({
                     id,
+                    title: id === projectId ? "Docs site" : "Bare",
                     workspaceRoot: "/projects/test",
                     defaultModelSelection: id === projectId ? modelSelection : null,
                   } as unknown as Project)
@@ -232,6 +241,7 @@ const withService = <A, E>(
       threadsUnreadable: yield* Ref.make(false),
       interruptGate: yield* Ref.make<Gate | undefined>(undefined),
       sendGate: yield* Ref.make<Gate | undefined>(undefined),
+      shellGate: yield* Ref.make<Gate | undefined>(undefined),
     };
     return yield* Effect.gen(function* () {
       const service = yield* CaptainService.CaptainService;
@@ -296,7 +306,7 @@ it.effect("create refuses a project it cannot find or that has no default model"
       assert.strictEqual(failureOf(missing).code, "not_found");
       const bare = yield* Effect.exit(service.create({ ...request, projectId: bareProjectId }));
       assert.strictEqual(failureOf(bare).code, "invalid_request");
-      assert.include(failureOf(bare).message, "no default model");
+      assert.include(failureOf(bare).message, "Project Bare has no default model");
       assert.lengthOf(yield* Ref.get(harness.launches), 0);
       assert.strictEqual(yield* storedCaptainCount, 0);
     }),
@@ -716,7 +726,45 @@ it.effect("a retirement cancelled while it stops the captain still tells the cap
   ),
 );
 
-it.effect("a report that races a retirement is refused and stores nothing", () =>
+const reportWithNeed = (service: CaptainService.CaptainService["Service"], threadId: ThreadId) =>
+  service.report(threadId, {
+    plan: "1. Keep going",
+    needs: [{ kind: "decision", summary: "Ship anyway?" }],
+  });
+
+it.effect("a retirement waits for a report already under way, then holds its needs", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain } = yield* createCaptain(service);
+      // The report holds the captain's lock and has not yet read whether it is still active.
+      const gate = yield* closeGate(harness.shellGate);
+      const reporting = yield* reportWithNeed(service, captain.threadId).pipe(Effect.forkChild);
+      yield* Deferred.await(gate.reached);
+      const retiring = yield* service
+        .setStatus({ captainId: captain.id, status: "retired", ...fromUser })
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      // The retirement has neither stored nor announced anything while the report runs.
+      assert.lengthOf(yield* Ref.get(harness.interrupts), 0);
+      assert.lengthOf(yield* Ref.get(harness.sends), 0);
+      yield* Deferred.succeed(gate.release, undefined);
+
+      // The report lands whole and tells the captain what it raised; then the captain is retired.
+      const reported = yield* Fiber.join(reporting);
+      assert.deepStrictEqual(
+        reported.raised.map((need) => need.summary),
+        ["Ship anyway?"],
+      );
+      const retired = yield* Fiber.join(retiring);
+      assert.strictEqual(retired.captain.status, "retired");
+      assert.strictEqual(retired.captain.plan, "1. Keep going");
+      assert.deepStrictEqual(retired.captain.openNeeds, []);
+      assert.deepStrictEqual(yield* Ref.get(harness.interrupts), [captain.threadId]);
+    }),
+  ),
+);
+
+it.effect("a report that arrives during a retirement is refused and stores nothing", () =>
   withService((service, harness) =>
     Effect.gen(function* () {
       const { captain } = yield* createCaptain(service);
@@ -725,12 +773,9 @@ it.effect("a report that races a retirement is refused and stores nothing", () =
         .setStatus({ captainId: captain.id, status: "retired", ...fromUser })
         .pipe(Effect.forkChild);
       yield* Deferred.await(gate.reached);
-      const reporting = yield* Effect.exit(
-        service.report(captain.threadId, {
-          plan: "1. Keep going",
-          needs: [{ kind: "decision", summary: "Ship anyway?" }],
-        }),
-      ).pipe(Effect.forkChild);
+      const reporting = yield* Effect.exit(reportWithNeed(service, captain.threadId)).pipe(
+        Effect.forkChild,
+      );
       yield* Effect.yieldNow;
       yield* Deferred.succeed(gate.release, undefined);
       yield* Fiber.join(retiring);
@@ -741,13 +786,33 @@ it.effect("a report that races a retirement is refused and stores nothing", () =
         SELECT COUNT(*) AS total FROM captain_needs
       `;
       assert.strictEqual(needs[0]?.total, 0);
-      const reactivated = yield* service.setStatus({
-        captainId: captain.id,
-        status: "active",
-        ...fromUser,
-      });
-      assert.strictEqual(reactivated.captain.plan, "");
-      assert.deepStrictEqual(reactivated.captain.openNeeds, []);
+    }),
+  ),
+);
+
+it.effect("a report whose request was cancelled is still saved and shown", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain } = yield* createCaptain(service);
+      const pull = yield* Stream.toPull(service.subscribeList({}));
+      assert.deepStrictEqual(
+        (yield* pull).map(({ captains }) => captains[0]?.openNeeds.length),
+        [0],
+      );
+
+      const gate = yield* closeGate(harness.shellGate);
+      const reporting = yield* reportWithNeed(service, captain.threadId).pipe(Effect.forkChild);
+      yield* Deferred.await(gate.reached);
+      const cancelling = yield* Fiber.interrupt(reporting).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(gate.release, undefined);
+      yield* Fiber.join(cancelling);
+
+      // Saved needs that no client is shown would wait on the user forever.
+      assert.deepStrictEqual(
+        (yield* pull).map(({ captains }) => captains[0]?.openNeeds.map((need) => need.summary)),
+        [["Ship anyway?"]],
+      );
     }),
   ),
 );

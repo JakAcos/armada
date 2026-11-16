@@ -229,8 +229,9 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
-  // Everything a captain is told (a message, an answer, a status change) goes through its lock,
-  // so the last thing it heard always matches what is stored about it.
+  // Everything a captain is told (a message, an answer, a status change) and everything it
+  // reports goes through its lock, so what it last heard and what is stored about it always
+  // agree. Nothing that holds the lock waits on the captain's turn, so a turn cannot deadlock it.
   const tellLock = yield* KeyedLock.make<CaptainId>();
   // A change re-emits the whole list; a slow subscriber needs only the latest signal.
   const changes = yield* PubSub.sliding<void>(1);
@@ -364,7 +365,10 @@ const make = Effect.gen(function* () {
     const settings = yield* serverSettings.getSettings.pipe(
       Effect.mapError(unavailable("read server settings")),
     );
-    return resolveProjectSettings(settings, project.value.id, project.value).settings;
+    return {
+      title: project.value.title,
+      ...resolveProjectSettings(settings, project.value.id, project.value).settings,
+    };
   });
 
   const create: CaptainService["Service"]["create"] = Effect.fn("CaptainService.create")(
@@ -374,7 +378,7 @@ const make = Effect.gen(function* () {
       if (modelSelection == null) {
         return yield* new CaptainError({
           code: "invalid_request",
-          message: `Project ${input.projectId} has no default model. Set one in the project's settings, then start the captain.`,
+          message: `Project ${defaults.title} has no default model. Set one in the project's settings, then start the captain.`,
         });
       }
       const key = yield* uuid;
@@ -546,21 +550,24 @@ const make = Effect.gen(function* () {
     function* (input) {
       yield* tellLock.withLock(
         input.captainId,
-        Effect.gen(function* () {
-          const captain = yield* requireCaptain(input.captainId).pipe(
-            Effect.flatMap(requireActive),
-          );
-          if (input.senderThreadId === captain.threadId) {
-            return yield* new CaptainError({
-              code: "invalid_request",
-              message:
-                "A captain cannot message itself. Use `captain_report` to update your plan or needs.",
-            });
-          }
-          yield* sendToCaptain(captain, captainUserMessage(input.text, input.createdBy), input);
-          yield* touch(captain.id, yield* nowIso).pipe(Effect.ignore({ log: true }));
-          yield* notifyChanged;
-        }),
+        // A message that was sent is always announced, even if its sender has gone.
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const captain = yield* requireCaptain(input.captainId).pipe(
+              Effect.flatMap(requireActive),
+            );
+            if (input.senderThreadId === captain.threadId) {
+              return yield* new CaptainError({
+                code: "invalid_request",
+                message:
+                  "A captain cannot message itself. Use `captain_report` to update your plan or needs.",
+              });
+            }
+            yield* sendToCaptain(captain, captainUserMessage(input.text, input.createdBy), input);
+            yield* touch(captain.id, yield* nowIso).pipe(Effect.ignore({ log: true }));
+            yield* notifyChanged;
+          }),
+        ),
       );
       return { captain: yield* summaryOf(input.captainId) };
     },
@@ -696,60 +703,64 @@ const make = Effect.gen(function* () {
       }
       // Under the captain's lock, with its state read inside: a report that races a retirement
       // either lands before it or is refused, and never stores needs the captain was told nothing
-      // about.
+      // about. It is one step: a cancelled request must not save needs that no client is shown.
       return yield* tellLock.withLock(
         found.value.id,
-        Effect.gen(function* () {
-          const captain = yield* requireCaptain(found.value.id).pipe(Effect.flatMap(requireActive));
-          const now = yield* nowIso;
-          const raisedIds: Array<CaptainNeedId> = [];
-          const newNeeds = yield* Effect.forEach(input.needs ?? [], (need) =>
-            uuid.pipe(Effect.map((key) => ({ need, id: CaptainNeedId.make(`need:${key}`) }))),
-          );
-          yield* sql
-            .withTransaction(
-              Effect.gen(function* () {
-                if (input.plan !== undefined) {
-                  yield* sql`
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const captain = yield* requireCaptain(found.value.id).pipe(
+              Effect.flatMap(requireActive),
+            );
+            const now = yield* nowIso;
+            const raisedIds: Array<CaptainNeedId> = [];
+            const newNeeds = yield* Effect.forEach(input.needs ?? [], (need) =>
+              uuid.pipe(Effect.map((key) => ({ need, id: CaptainNeedId.make(`need:${key}`) }))),
+            );
+            yield* sql
+              .withTransaction(
+                Effect.gen(function* () {
+                  if (input.plan !== undefined) {
+                    yield* sql`
                     UPDATE captains SET plan = ${input.plan}, plan_updated_at = ${now}
                     WHERE captain_id = ${captain.id}
                   `;
-                }
-                for (const { need, id } of newNeeds) {
-                  yield* sql`INSERT INTO captain_needs ${sql.insert({
-                    need_id: id,
-                    captain_id: captain.id,
-                    kind: need.kind,
-                    summary: need.summary,
-                    detail: need.detail ?? null,
-                    status: "open",
-                    resolution: null,
-                    created_at: now,
-                    resolved_at: null,
-                  })}`;
-                  raisedIds.push(id);
-                }
-                const withdraw = input.withdrawNeedIds ?? [];
-                if (withdraw.length > 0) {
-                  // Scoped to this captain so it cannot close another captain's needs.
-                  yield* sql`
+                  }
+                  for (const { need, id } of newNeeds) {
+                    yield* sql`INSERT INTO captain_needs ${sql.insert({
+                      need_id: id,
+                      captain_id: captain.id,
+                      kind: need.kind,
+                      summary: need.summary,
+                      detail: need.detail ?? null,
+                      status: "open",
+                      resolution: null,
+                      created_at: now,
+                      resolved_at: null,
+                    })}`;
+                    raisedIds.push(id);
+                  }
+                  const withdraw = input.withdrawNeedIds ?? [];
+                  if (withdraw.length > 0) {
+                    // Scoped to this captain so it cannot close another captain's needs.
+                    yield* sql`
                     UPDATE captain_needs
                     SET status = 'resolved', resolution = 'Withdrawn by the captain.', resolved_at = ${now}
                     WHERE captain_id = ${captain.id} AND status = 'open'
                       AND ${sql.in("need_id", withdraw)}
                   `;
-                }
-                yield* touch(captain.id, now);
-              }),
-            )
-            .pipe(Effect.mapError(unavailable("save the captain's report")));
-          yield* notifyChanged;
-          const summary = yield* summaryOf(captain.id);
-          return {
-            captain: summary,
-            raised: summary.openNeeds.filter((need) => raisedIds.includes(need.id)),
-          };
-        }),
+                  }
+                  yield* touch(captain.id, now);
+                }),
+              )
+              .pipe(Effect.mapError(unavailable("save the captain's report")));
+            yield* notifyChanged;
+            const summary = yield* summaryOf(captain.id);
+            return {
+              captain: summary,
+              raised: summary.openNeeds.filter((need) => raisedIds.includes(need.id)),
+            };
+          }),
+        ),
       );
     },
   );
