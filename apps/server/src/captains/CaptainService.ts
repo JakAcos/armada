@@ -31,6 +31,7 @@ import {
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Context from "effect/Context";
@@ -43,6 +44,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
+import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import { OrchestratorRuntimeModeAboveCeilingError } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -59,7 +61,7 @@ import {
 export interface CaptainProvenance {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
-  /** The agent thread that relays this, if one does. A captain cannot answer its own needs. */
+  /** The agent thread that relays this, if one does. A captain's thread cannot answer a need. */
   readonly senderThreadId?: ThreadId;
 }
 
@@ -189,6 +191,13 @@ const launchFailure = (
 
 const ACTIVE_CREW_STATUSES = new Set(["idle", "pending", "running", "waiting"]);
 
+/** The preview's last unit is never half of a surrogate pair, which would not encode as text. */
+const previewOf = (result: string) => {
+  const last = result.charCodeAt(CREW_RESULT_PREVIEW_LENGTH - 1);
+  const splitsPair = last >= 0xd800 && last <= 0xdbff;
+  return result.slice(0, CREW_RESULT_PREVIEW_LENGTH - (splitsPair ? 1 : 0));
+};
+
 const crewFromSubagents = (
   subagents: ReadonlyArray<{
     readonly id: string;
@@ -209,7 +218,7 @@ const crewFromSubagents = (
       result:
         task.result === null || task.result.length <= CREW_RESULT_PREVIEW_LENGTH
           ? task.result
-          : `${task.result.slice(0, CREW_RESULT_PREVIEW_LENGTH)}…`,
+          : `${previewOf(task.result)}…`,
     }));
 
 const make = Effect.gen(function* () {
@@ -219,6 +228,10 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const ids = yield* IdAllocator.IdAllocatorV2;
+  const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  // Everything a captain is told (a message, an answer, a status change) goes through its lock,
+  // so the last thing it heard always matches what is stored about it.
+  const tellLock = yield* KeyedLock.make<CaptainId>();
   // A change re-emits the whole list; a slow subscriber needs only the latest signal.
   const changes = yield* PubSub.sliding<void>(1);
   const notifyChanged = PubSub.publish(changes, undefined).pipe(Effect.asVoid);
@@ -237,6 +250,17 @@ const make = Effect.gen(function* () {
     return Option.fromNullishOr(rows[0]).pipe(Option.map(captainFromRow));
   });
 
+  /**
+   * A captain whose thread was deleted has nothing to run in. Its row stays, in case the thread is
+   * restored. A thread that cannot be read counts as present, so one bad read hides no captain.
+   */
+  const hasLiveThread = Effect.fn("CaptainService.hasLiveThread")(function* (captain: Captain) {
+    const shell = yield* threadManagement
+      .getThreadShell(captain.threadId)
+      .pipe(Effect.orElseSucceed(() => undefined));
+    return shell === undefined || (shell !== null && shell.deletedAt === null);
+  });
+
   const requireCaptain = Effect.fn("CaptainService.requireCaptain")(function* (
     captainId: CaptainId,
   ) {
@@ -245,6 +269,12 @@ const make = Effect.gen(function* () {
       return yield* new CaptainError({
         code: "not_found",
         message: `Captain ${captainId} was not found.`,
+      });
+    }
+    if (!(yield* hasLiveThread(captain.value))) {
+      return yield* new CaptainError({
+        code: "not_found",
+        message: `Captain ${captain.value.name}'s thread no longer exists.`,
       });
     }
     return captain.value;
@@ -288,14 +318,6 @@ const make = Effect.gen(function* () {
   const summaryOf = Effect.fn("CaptainService.summaryOf")(function* (captainId: CaptainId) {
     const summaries = yield* summarize([yield* requireCaptain(captainId)]);
     return summaries[0]!;
-  });
-
-  /** A captain whose thread was deleted has nothing to run in. Its row stays, in case the thread is restored. */
-  const hasLiveThread = Effect.fn("CaptainService.hasLiveThread")(function* (captain: Captain) {
-    const shell = yield* threadManagement
-      .getThreadShell(captain.threadId)
-      .pipe(Effect.mapError(unavailable("read the captain's thread")));
-    return shell !== null && shell.deletedAt === null;
   });
 
   const list: CaptainService["Service"]["list"] = Effect.fn("CaptainService.list")(
@@ -414,7 +436,8 @@ const make = Effect.gen(function* () {
           Effect.onError(() =>
             Effect.flatMap(threadCommitted, (committed) =>
               committed
-                ? Effect.void
+                ? // An interrupted launch returns nothing, but its captain is running: show it.
+                  notifyChanged
                 : sql`DELETE FROM captains WHERE captain_id = ${id}`.pipe(
                     Effect.ignore({ log: true }),
                   ),
@@ -433,10 +456,15 @@ const make = Effect.gen(function* () {
     provenance: CaptainProvenance,
   ) {
     const key = yield* uuid;
+    const commandId = CommandId.make(`captain-message:${key}`);
+    const accepted = receipts.getByCommandId(commandId).pipe(
+      Effect.map(Option.exists((receipt) => receipt.status === "accepted")),
+      Effect.orElseSucceed(() => false),
+    );
     yield* threadManagement
       .sendToThread({
         projectId: captain.projectId,
-        commandId: CommandId.make(`captain-message:${key}`),
+        commandId,
         threadId: captain.threadId,
         messageId: MessageId.make(`captain-message:${key}`),
         ...(provenance.senderThreadId === undefined
@@ -449,6 +477,15 @@ const make = Effect.gen(function* () {
         creationSource: provenance.creationSource,
       })
       .pipe(
+        // A send can fail after the thread accepted the message, on the read that builds its
+        // reply. The captain has it, so reporting a failure would invite a second copy.
+        Effect.catch((error) =>
+          Effect.flatMap(accepted, (delivered) =>
+            delivered
+              ? Effect.logWarning("Captain message was delivered, then its send failed.", error)
+              : Effect.fail(error),
+          ),
+        ),
         Effect.catchTags({
           ThreadManagementThreadArchivedError: (cause) =>
             Effect.fail(
@@ -507,13 +544,25 @@ const make = Effect.gen(function* () {
 
   const message: CaptainService["Service"]["message"] = Effect.fn("CaptainService.message")(
     function* (input) {
-      const captain = yield* requireCaptain(input.captainId).pipe(Effect.flatMap(requireActive));
-      yield* sendToCaptain(captain, captainUserMessage(input.text, input.createdBy), input);
-      yield* touch(captain.id, yield* nowIso).pipe(
-        Effect.mapError(unavailable("update the captain")),
+      yield* tellLock.withLock(
+        input.captainId,
+        Effect.gen(function* () {
+          const captain = yield* requireCaptain(input.captainId).pipe(
+            Effect.flatMap(requireActive),
+          );
+          if (input.senderThreadId === captain.threadId) {
+            return yield* new CaptainError({
+              code: "invalid_request",
+              message:
+                "A captain cannot message itself. Use `captain_report` to update your plan or needs.",
+            });
+          }
+          yield* sendToCaptain(captain, captainUserMessage(input.text, input.createdBy), input);
+          yield* touch(captain.id, yield* nowIso).pipe(Effect.ignore({ log: true }));
+        }),
       );
       yield* notifyChanged;
-      return { captain: yield* summaryOf(captain.id) };
+      return { captain: yield* summaryOf(input.captainId) };
     },
   );
 
@@ -521,49 +570,61 @@ const make = Effect.gen(function* () {
     "CaptainService.resolveNeed",
   )(function* (input) {
     const need = yield* findNeed(input.needId);
-    const captain = yield* requireCaptain(need.captainId).pipe(Effect.flatMap(requireActive));
-    if (input.senderThreadId === captain.threadId) {
+    // A need is for the user. No captain's thread answers one, its own or another captain's.
+    if (
+      input.senderThreadId !== undefined &&
+      Option.isSome(yield* findCaptain({ threadId: input.senderThreadId }))
+    ) {
       return yield* new CaptainError({
         code: "invalid_request",
         message:
-          "A captain cannot resolve its own need. Withdraw it with `captain_report` if it no longer needs the user.",
+          "A captain cannot resolve a need, its own or another captain's. Withdraw your own with `captain_report` once it no longer needs the user.",
       });
     }
-    const now = yield* nowIso;
-    const reopen = sql`
-      UPDATE captain_needs SET status = 'open', resolution = NULL, resolved_at = NULL
-      WHERE need_id = ${need.id} AND status = 'resolved' AND resolved_at = ${now}
-    `.pipe(Effect.andThen(notifyChanged), Effect.ignore({ log: true }));
-    // Claiming and delivering are one step to the user: a disconnect between them must not
-    // leave an answer that was recorded but never sent.
-    yield* Effect.uninterruptible(
-      Effect.gen(function* () {
-        // Only the first resolver wins; a second click must not send the captain a second answer.
-        const claimed = yield* sql<{ readonly need_id: string }>`
-          UPDATE captain_needs
-          SET status = 'resolved', resolution = ${input.resolution}, resolved_at = ${now}
-          WHERE need_id = ${need.id} AND status = 'open'
-          RETURNING need_id
-        `.pipe(Effect.mapError(unavailable("resolve the need")));
-        if (claimed.length === 0) {
-          return yield* new CaptainError({
-            code: "invalid_request",
-            message: `Need ${need.id} is already resolved.`,
-          });
-        }
-        // An answer the captain never received is not an answer: the need goes back to the user.
-        yield* sendToCaptain(
-          captain,
-          captainResolutionMessage(need, input.resolution, input.createdBy),
-          input,
-        ).pipe(Effect.onError(() => reopen));
-        yield* touch(captain.id, now).pipe(Effect.ignore({ log: true }));
-      }),
+    yield* tellLock.withLock(
+      need.captainId,
+      // Claiming and delivering are one step to the user: a disconnect between them must not
+      // leave an answer that was recorded but never sent.
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          const captain = yield* requireCaptain(need.captainId).pipe(Effect.flatMap(requireActive));
+          const now = yield* nowIso;
+          // Only the first resolver wins; a second click must not send the captain a second
+          // answer. The status is checked in the same statement, so a retired captain gets none.
+          const claimed = yield* sql<{ readonly need_id: string }>`
+            UPDATE captain_needs
+            SET status = 'resolved', resolution = ${input.resolution}, resolved_at = ${now}
+            WHERE need_id = ${need.id} AND status = 'open'
+              AND EXISTS (
+                SELECT 1 FROM captains
+                WHERE captain_id = ${captain.id} AND status = 'active'
+              )
+            RETURNING need_id
+          `.pipe(Effect.mapError(unavailable("resolve the need")));
+          if (claimed.length === 0) {
+            return yield* new CaptainError({
+              code: "invalid_request",
+              message: `Need ${need.id} is already resolved.`,
+            });
+          }
+          // An answer the captain never received is not an answer: the need goes back to the user.
+          const reopen = sql`
+            UPDATE captain_needs SET status = 'open', resolution = NULL, resolved_at = NULL
+            WHERE need_id = ${need.id} AND status = 'resolved' AND resolved_at = ${now}
+          `.pipe(Effect.andThen(notifyChanged), Effect.ignore({ log: true }));
+          yield* sendToCaptain(
+            captain,
+            captainResolutionMessage(need, input.resolution, input.createdBy),
+            input,
+          ).pipe(Effect.onError(() => reopen));
+          yield* touch(captain.id, now).pipe(Effect.ignore({ log: true }));
+        }),
+      ),
     );
     yield* notifyChanged;
     return {
       need: yield* findNeed(need.id),
-      captain: yield* summaryOf(captain.id),
+      captain: yield* summaryOf(need.captainId),
     };
   });
 
@@ -597,20 +658,29 @@ const make = Effect.gen(function* () {
 
   const setStatus: CaptainService["Service"]["setStatus"] = Effect.fn("CaptainService.setStatus")(
     function* (input) {
-      const captain = yield* requireCaptain(input.captainId);
       const status: CaptainStatus = input.status;
-      const now = yield* nowIso;
-      // Two clicks change the status once, so the captain is told once.
-      const changed = yield* sql<{ readonly captain_id: string }>`
-        UPDATE captains SET status = ${status}, updated_at = ${now}
-        WHERE captain_id = ${captain.id} AND status <> ${status}
-        RETURNING captain_id
-      `.pipe(Effect.mapError(unavailable("update the captain")));
-      if (changed.length > 0) {
-        yield* notifyChanged;
-        yield* announceStatus(captain, status, input);
-      }
-      return { captain: yield* summaryOf(captain.id) };
+      yield* tellLock.withLock(
+        input.captainId,
+        // The stored status and what the captain was told change together, or a cancelled
+        // request would leave a "retired" captain that was never stopped.
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const captain = yield* requireCaptain(input.captainId);
+            const now = yield* nowIso;
+            // Two clicks change the status once, so the captain is told once.
+            const changed = yield* sql<{ readonly captain_id: string }>`
+              UPDATE captains SET status = ${status}, updated_at = ${now}
+              WHERE captain_id = ${captain.id} AND status <> ${status}
+              RETURNING captain_id
+            `.pipe(Effect.mapError(unavailable("update the captain")));
+            if (changed.length > 0) {
+              yield* notifyChanged;
+              yield* announceStatus(captain, status, input);
+            }
+          }),
+        ),
+      );
+      return { captain: yield* summaryOf(input.captainId) };
     },
   );
 

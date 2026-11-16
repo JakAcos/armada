@@ -21,8 +21,8 @@ starts crew tasks.
 Agents can also start and manage captains with the `captain_create`, `captain_list`,
 `captain_message`, and `captain_resolve_need` tools, but only when you ask them to. The captain is
 told when a message or an answer was relayed by an agent rather than sent by you. An agent needs
-the same access to the captain's thread as it needs to message any other thread, and a captain
-cannot answer its own needs.
+the same access to the captain's thread as it needs to message any other thread. A need is yours
+to answer: no captain can resolve one, and neither can a captain's crew.
 
 ## Needs you
 

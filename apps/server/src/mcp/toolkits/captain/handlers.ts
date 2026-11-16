@@ -9,18 +9,24 @@ import { CaptainToolkit } from "./tools.ts";
 
 const toMcpFailure = (error: CaptainError) =>
   new OrchestratorMcpFailure({
-    code:
-      error.code === "invalid_request" || error.code === "retired"
-        ? "invalid_request"
-        : error.code === "not_found"
-          ? "task_not_found"
-          : "orchestration_error",
+    code: error.code === "unavailable" ? "orchestration_error" : "invalid_request",
     message: error.message,
   });
 
-/** What the captain is told about an agent's relay, and which thread may not answer for the user. */
+/**
+ * What the captain is told about an agent's relay, and which thread may not answer for the user.
+ * A delegated child works for its parent, not the user, so it relays nothing: the tools are hidden
+ * from it, and a call made anyway is refused here.
+ */
 const fromAgent = Effect.gen(function* () {
-  const { scope } = yield* readCaller();
+  const { scope, caller } = yield* readCaller();
+  if (scope.thread?.subagent === true || caller?.lineage.relationshipToParent === "subagent") {
+    return yield* new OrchestratorMcpFailure({
+      code: "capability_denied",
+      message:
+        "A delegated task cannot start, message, or answer for a captain. Report back to your parent instead.",
+    });
+  }
   return {
     createdBy: "agent",
     creationSource: "mcp",

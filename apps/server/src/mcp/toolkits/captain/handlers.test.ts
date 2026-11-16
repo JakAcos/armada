@@ -62,6 +62,8 @@ interface ServiceCall {
 const harness = (input: {
   readonly callerMode: RuntimeMode;
   readonly capabilities?: ReadonlyArray<McpInvocationContext.McpCapability>;
+  /** The caller is a delegated child, as a captain's crew is. */
+  readonly subagent?: true;
   readonly calls: Array<ServiceCall>;
 }) => {
   const record =
@@ -81,6 +83,7 @@ const harness = (input: {
             threadId: callerThreadId,
             providerSessionId: "provider:captains",
             providerInstanceId: ProviderInstanceId.make("codex"),
+            ...(input.subagent === true ? { subagent: true } : {}),
           },
           client: undefined,
           capabilities: new Set<McpInvocationContext.McpCapability>(
@@ -176,5 +179,19 @@ it.effect("a credential that cannot control threads reaches no captain tool", ()
       expect(result).toMatchObject({ code: "capability_denied" });
     }
     expect(calls).toEqual([]);
+  }),
+);
+
+it.effect("a delegated child, such as a captain's crew, cannot act for the user", () =>
+  Effect.gen(function* () {
+    const calls: Array<ServiceCall> = [];
+    const results = yield* callAll.pipe(
+      Effect.provide(harness({ callerMode: "full-access", subagent: true, calls })),
+    );
+    expect(results.create).toMatchObject({ code: "capability_denied" });
+    expect(results.message).toMatchObject({ code: "capability_denied" });
+    expect(results.resolve).toMatchObject({ code: "capability_denied" });
+    // It can still read, and a report is judged by whether its thread is a captain's.
+    expect(calls.map((call) => call.method)).toEqual(["list", "report"]);
   }),
 );

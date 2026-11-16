@@ -1,5 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
+  type AtomCommandResult,
+  isAtomCommandInterrupted,
+} from "@t3tools/client-runtime/state/runtime";
+import {
   CAPTAIN_CHARTER_MAX_LENGTH,
   CAPTAIN_MESSAGE_MAX_LENGTH,
   CAPTAIN_NAME_MAX_LENGTH,
@@ -14,7 +18,7 @@ import { useState } from "react";
 import { captainEnvironment } from "../../state/captains";
 import { useProjects } from "../../state/entities";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
-import { useEnvironmentQuery } from "../../state/query";
+import { formatEnvironmentQueryError, useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { AppRouteModal, AppRouteModalClose } from "../AppRouteModal";
@@ -25,6 +29,19 @@ import { Input } from "../ui/input";
 import { ScrollArea } from "../ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
+import { stackedThreadToast, toastManager } from "../ui/toast";
+
+/** The server's reason is the useful part ("no default model", "thread is archived"), so show it. */
+function reportFailure(title: string, result: AtomCommandResult<unknown, unknown>) {
+  if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title,
+      description: formatEnvironmentQueryError(result.cause),
+    }),
+  );
+}
 
 export function CaptainsPage() {
   const { environments } = useEnvironments();
@@ -156,6 +173,7 @@ function NeedCard({
     setPending(true);
     const result = await resolve({ environmentId, input: { needId: need.id, resolution: text } });
     setPending(false);
+    reportFailure("Could not resolve the need", result);
     if (result._tag === "Success") setResolution("");
   };
   return (
@@ -221,16 +239,18 @@ function CaptainCard({
     setSending(true);
     const result = await send({ environmentId, input: { captainId: captain.id, text } });
     setSending(false);
+    reportFailure(`Could not message Captain ${captain.name}`, result);
     if (result._tag === "Success") setMessage("");
   };
   const toggleStatus = async () => {
     if (!canSetStatus || statusPending) return;
     setStatusPending(true);
-    await setStatus({
+    const result = await setStatus({
       environmentId,
       input: { captainId: captain.id, status: retired ? "active" : "retired" },
     });
     setStatusPending(false);
+    reportFailure(`Could not ${retired ? "reactivate" : "retire"} Captain ${captain.name}`, result);
   };
 
   return (
@@ -344,6 +364,7 @@ function NewCaptainForm({
       input: { projectId: selectedProject.id, name: name.trim(), charter: charter.trim() },
     });
     setPending(false);
+    reportFailure("Could not start the captain", result);
     if (result._tag === "Success") {
       setName("");
       setCharter("");

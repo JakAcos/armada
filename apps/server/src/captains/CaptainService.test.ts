@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CaptainNeedId,
   type CaptainError,
+  type CommandId,
   type OrchestrationV2ThreadShell,
   type Project,
   ProjectId,
@@ -11,8 +12,10 @@ import {
   isCaptainError,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -20,6 +23,7 @@ import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
+import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import { OrchestratorRuntimeModeAboveCeilingError } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -51,6 +55,16 @@ interface Harness {
   readonly threads: Ref.Ref<ReadonlyMap<ThreadId, { readonly deleted: boolean }>>;
   /** While true, a send fails as it does for an archived thread. */
   readonly threadArchived: Ref.Ref<boolean>;
+  /** While true, a send is accepted by the thread and then fails on the read for its reply. */
+  readonly sendFailsAfterAccept: Ref.Ref<boolean>;
+  readonly acceptedCommands: Ref.Ref<ReadonlySet<CommandId>>;
+  /** While true, a thread's shell cannot be read. */
+  readonly threadsUnreadable: Ref.Ref<boolean>;
+  /** When set, an interrupt signals `reached` and then waits for `release`. */
+  readonly interruptGate: Ref.Ref<
+    | { readonly reached: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void> }
+    | undefined
+  >;
 }
 
 interface HarnessOptions {
@@ -111,24 +125,50 @@ const makeLayer = (harness: Harness, options: HarnessOptions) => {
                 });
               }
               yield* Ref.update(harness.sends, (all) => [...all, input]);
+              yield* Ref.update(harness.acceptedCommands, (all) =>
+                new Set(all).add(input.commandId),
+              );
+              if (yield* Ref.get(harness.sendFailsAfterAccept)) {
+                return yield* new ThreadManagementService.ThreadManagementThreadNotFoundError({
+                  projectId: input.projectId,
+                  threadId: input.threadId,
+                });
+              }
               return {} as never;
             }),
           interruptThread: (input) =>
-            Ref.update(harness.interrupts, (all) => [...all, input.threadId]).pipe(
-              Effect.as({ type: "no_active_run" } as const),
-            ),
+            Effect.gen(function* () {
+              yield* Ref.update(harness.interrupts, (all) => [...all, input.threadId]);
+              const gate = yield* Ref.get(harness.interruptGate);
+              if (gate !== undefined) {
+                yield* Deferred.succeed(gate.reached, undefined);
+                yield* Deferred.await(gate.release);
+              }
+              return { type: "no_active_run" } as const;
+            }),
           getThreadRecords: () => Effect.succeed({ subagents: options.subagents ?? [] } as never),
           getThreadShell: (threadId) =>
-            Ref.get(harness.threads).pipe(
-              Effect.map((threads) => {
-                const thread = threads.get(threadId);
-                return thread === undefined
-                  ? null
-                  : ({
-                      id: threadId,
-                      deletedAt: thread.deleted ? "2026-01-01T00:00:00.000Z" : null,
-                    } as unknown as OrchestrationV2ThreadShell);
-              }),
+            Effect.gen(function* () {
+              if (yield* Ref.get(harness.threadsUnreadable)) {
+                return yield* Effect.fail("projection unavailable" as never);
+              }
+              const thread = (yield* Ref.get(harness.threads)).get(threadId);
+              return thread === undefined
+                ? null
+                : ({
+                    id: threadId,
+                    deletedAt: thread.deleted ? "2026-01-01T00:00:00.000Z" : null,
+                  } as unknown as OrchestrationV2ThreadShell);
+            }),
+        }),
+        Layer.mock(CommandReceiptStore.CommandReceiptStoreV2)({
+          getByCommandId: (commandId) =>
+            Ref.get(harness.acceptedCommands).pipe(
+              Effect.map((accepted) =>
+                accepted.has(commandId)
+                  ? Option.some({ commandId, status: "accepted" } as never)
+                  : Option.none(),
+              ),
             ),
         }),
         Layer.mock(ProjectService.ProjectService)({
@@ -168,6 +208,13 @@ const withService = <A, E>(
       interrupts: yield* Ref.make<ReadonlyArray<ThreadId>>([]),
       threads: yield* Ref.make<ReadonlyMap<ThreadId, { readonly deleted: boolean }>>(new Map()),
       threadArchived: yield* Ref.make(false),
+      sendFailsAfterAccept: yield* Ref.make(false),
+      acceptedCommands: yield* Ref.make<ReadonlySet<CommandId>>(new Set()),
+      threadsUnreadable: yield* Ref.make(false),
+      interruptGate: yield* Ref.make<
+        | { readonly reached: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void> }
+        | undefined
+      >(undefined),
     };
     return yield* Effect.gen(function* () {
       const service = yield* CaptainService.CaptainService;
@@ -288,8 +335,34 @@ it.effect("a captain whose thread was deleted leaves the list until the thread r
         );
       yield* setDeleted(true);
       assert.deepStrictEqual((yield* service.list({})).captains, []);
+      // It is gone everywhere, not only from the list.
+      assert.strictEqual(
+        failureOf(yield* Effect.exit(service.digest(captain.id))).code,
+        "not_found",
+      );
+      assert.strictEqual(
+        failureOf(
+          yield* Effect.exit(
+            service.setStatus({ captainId: captain.id, status: "retired", ...fromUser }),
+          ),
+        ).code,
+        "not_found",
+      );
       yield* setDeleted(false);
       assert.lengthOf((yield* service.list({})).captains, 1);
+    }),
+  ),
+);
+
+it.effect("a thread that cannot be read hides no captain", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain } = yield* createCaptain(service);
+      yield* Ref.set(harness.threadsUnreadable, true);
+      assert.deepStrictEqual(
+        (yield* service.list({})).captains.map((listed) => listed.id),
+        [captain.id],
+      );
     }),
   ),
 );
@@ -431,22 +504,53 @@ it.effect("an answer that cannot be delivered leaves the need open to answer aga
   ),
 );
 
-it.effect("an agent's relay is labeled, and a captain cannot answer its own need", () =>
+it.effect("an answer the captain received stays resolved when its send then fails", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain } = yield* createCaptain(service);
+      const need = yield* raiseDecision(service, captain.threadId);
+      yield* Ref.set(harness.sendFailsAfterAccept, true);
+      const resolved = yield* service.resolveNeed({
+        needId: need.id,
+        resolution: "Yes.",
+        ...fromUser,
+      });
+      // Reopening it would let the user send the captain a second, possibly different, answer.
+      assert.strictEqual(resolved.need.status, "resolved");
+      assert.deepStrictEqual(resolved.captain.openNeeds, []);
+      assert.lengthOf(yield* Ref.get(harness.sends), 1);
+    }),
+  ),
+);
+
+it.effect("an agent's relay is labeled, and no captain's thread can answer a need", () =>
   withService((service, harness) =>
     Effect.gen(function* () {
       const { captain } = yield* createCaptain(service);
       const need = yield* raiseDecision(service, captain.threadId);
       const fromAgent = { createdBy: "agent", creationSource: "mcp" } as const;
 
-      const own = yield* Effect.exit(
-        service.resolveNeed({
-          needId: need.id,
-          resolution: "Yes.",
+      const { captain: other } = yield* createCaptain(service, "Infra");
+      for (const senderThreadId of [captain.threadId, other.threadId]) {
+        const refused = yield* Effect.exit(
+          service.resolveNeed({
+            needId: need.id,
+            resolution: "Yes.",
+            ...fromAgent,
+            senderThreadId,
+          }),
+        );
+        assert.strictEqual(failureOf(refused).code, "invalid_request");
+      }
+      const toSelf = yield* Effect.exit(
+        service.message({
+          captainId: captain.id,
+          text: "Keep going.",
           ...fromAgent,
           senderThreadId: captain.threadId,
         }),
       );
-      assert.strictEqual(failureOf(own).code, "invalid_request");
+      assert.strictEqual(failureOf(toSelf).code, "invalid_request");
       assert.lengthOf(yield* Ref.get(harness.sends), 0);
 
       const relay = ThreadId.make("thread:helper");
@@ -540,6 +644,67 @@ it.effect("retiring succeeds even when the captain's thread cannot be reached", 
         ...fromUser,
       });
       assert.strictEqual(retired.captain.status, "retired");
+    }),
+  ),
+);
+
+const gateInterrupts = (harness: Harness) =>
+  Effect.gen(function* () {
+    const gate = {
+      reached: yield* Deferred.make<void>(),
+      release: yield* Deferred.make<void>(),
+    };
+    yield* Ref.set(harness.interruptGate, gate);
+    return gate;
+  });
+
+it.effect("a reactivation that races a retirement is told to the captain after it", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain } = yield* createCaptain(service);
+      const setStatus = (status: "active" | "retired") =>
+        service.setStatus({ captainId: captain.id, status, ...fromUser });
+      const gate = yield* gateInterrupts(harness);
+
+      // The retirement is stored and is stopping the captain when the reactivation arrives.
+      const retiring = yield* setStatus("retired").pipe(Effect.forkChild);
+      yield* Deferred.await(gate.reached);
+      const reactivating = yield* setStatus("active").pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      assert.lengthOf(yield* Ref.get(harness.sends), 0);
+      yield* Deferred.succeed(gate.release, undefined);
+      yield* Fiber.join(retiring);
+      const reactivated = yield* Fiber.join(reactivating);
+
+      // The last thing the captain heard matches what is stored.
+      assert.strictEqual(reactivated.captain.status, "active");
+      const notices = (yield* Ref.get(harness.sends)).map((send) => send.text);
+      assert.lengthOf(notices, 2);
+      assert.include(notices[0] ?? "", "retired you");
+      assert.include(notices[1] ?? "", "reactivated you");
+    }),
+  ),
+);
+
+it.effect("a retirement cancelled while it stops the captain still tells the captain", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain } = yield* createCaptain(service);
+      const gate = yield* gateInterrupts(harness);
+      const retiring = yield* service
+        .setStatus({ captainId: captain.id, status: "retired", ...fromUser })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(gate.reached);
+      const cancelling = yield* Fiber.interrupt(retiring).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(gate.release, undefined);
+      yield* Fiber.join(cancelling);
+
+      const notices = (yield* Ref.get(harness.sends)).map((send) => send.text);
+      assert.lengthOf(notices, 1);
+      assert.include(notices[0] ?? "", "retired you");
+      const { captains } = yield* service.list({});
+      assert.strictEqual(captains[0]?.status, "retired");
     }),
   ),
 );

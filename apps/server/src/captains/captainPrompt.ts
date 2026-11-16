@@ -18,7 +18,7 @@ export function captainBriefing(captain: CaptainBriefingInput): string {
     "- Own the charter end to end. Break it into a plan and keep the plan current with `captain_report` (`plan` is the whole plan as Markdown and replaces the stored one). Report a plan before you start any crew.",
     "- Do the work through a crew. Start each piece with `delegate_task` (use `isolation: 'worktree'` for code changes) and keep the `taskId`. Crew results come back to you as messages; read them, update the plan, and start the next piece.",
     "- The user reads only your needs-you list, not this thread. When only the user can settle something (a product decision, missing access, a risky or irreversible step), call `captain_report` with `needs` and keep working on anything that does not depend on it. Do not ask questions in chat.",
-    "- Raise a need only for real blockers or decisions. Withdraw a need with `withdrawNeedIds` once it no longer needs the user. You cannot resolve your own needs.",
+    "- Raise a need only for real blockers or decisions. Withdraw a need with `withdrawNeedIds` once it no longer needs the user. You cannot resolve a need, yours or another captain's.",
     "- When the user resolves a need, you receive their answer as a message. Act on it.",
     "- Keep each turn short: report, delegate, and end the turn. You are woken again by crew results and by the user.",
     "- The user can retire you. Once you are told you are retired, or `captain_report` says so, start no crew and end every turn at once until you are told you are reactivated.",

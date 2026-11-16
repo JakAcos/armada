@@ -308,7 +308,12 @@ const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
 );
 const layerCaptainProvided = CaptainService.layer.pipe(
   Layer.provide(
-    Layer.mergeAll(layerThreadLaunchProvided, layerThreadManagementProvided, IdAllocator.layer),
+    Layer.mergeAll(
+      layerThreadLaunchProvided,
+      layerThreadManagementProvided,
+      layerCommandReceiptStoreProvided,
+      IdAllocator.layer,
+    ),
   ),
 );
 const layerScratchThreadPromotionProvided = ScratchThreadPromotion.layer.pipe(
