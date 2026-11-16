@@ -44,6 +44,8 @@ tasks are ordinary child threads; open them from the captain's thread.
 Select **Retire** to stop a captain. Its current turn is stopped and it is told it is retired. A
 retired captain cannot receive messages or raise needs, and its open needs leave **Needs you**.
 Crew tasks that are already running finish on their own; stop one from its thread if you need to.
+A turn that was already queued for the captain, such as a crew result, can run before it reads the
+retirement notice.
 
 Select **Reactivate** to bring it back. Its needs return to **Needs you** and it picks its charter
 up again.

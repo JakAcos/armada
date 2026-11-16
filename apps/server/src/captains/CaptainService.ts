@@ -559,9 +559,9 @@ const make = Effect.gen(function* () {
           }
           yield* sendToCaptain(captain, captainUserMessage(input.text, input.createdBy), input);
           yield* touch(captain.id, yield* nowIso).pipe(Effect.ignore({ log: true }));
+          yield* notifyChanged;
         }),
       );
-      yield* notifyChanged;
       return { captain: yield* summaryOf(input.captainId) };
     },
   );
@@ -618,10 +618,11 @@ const make = Effect.gen(function* () {
             input,
           ).pipe(Effect.onError(() => reopen));
           yield* touch(captain.id, now).pipe(Effect.ignore({ log: true }));
+          // Inside the protected step: a caller that disconnected still changed the list.
+          yield* notifyChanged;
         }),
       ),
     );
-    yield* notifyChanged;
     return {
       need: yield* findNeed(need.id),
       captain: yield* summaryOf(need.captainId),
@@ -693,55 +694,63 @@ const make = Effect.gen(function* () {
           message: "Only a captain's own thread can report. This thread is not a captain.",
         });
       }
-      const captain = yield* requireActive(found.value);
-      const now = yield* nowIso;
-      const raisedIds: Array<CaptainNeedId> = [];
-      const newNeeds = yield* Effect.forEach(input.needs ?? [], (need) =>
-        uuid.pipe(Effect.map((key) => ({ need, id: CaptainNeedId.make(`need:${key}`) }))),
+      // Under the captain's lock, with its state read inside: a report that races a retirement
+      // either lands before it or is refused, and never stores needs the captain was told nothing
+      // about.
+      return yield* tellLock.withLock(
+        found.value.id,
+        Effect.gen(function* () {
+          const captain = yield* requireCaptain(found.value.id).pipe(Effect.flatMap(requireActive));
+          const now = yield* nowIso;
+          const raisedIds: Array<CaptainNeedId> = [];
+          const newNeeds = yield* Effect.forEach(input.needs ?? [], (need) =>
+            uuid.pipe(Effect.map((key) => ({ need, id: CaptainNeedId.make(`need:${key}`) }))),
+          );
+          yield* sql
+            .withTransaction(
+              Effect.gen(function* () {
+                if (input.plan !== undefined) {
+                  yield* sql`
+                    UPDATE captains SET plan = ${input.plan}, plan_updated_at = ${now}
+                    WHERE captain_id = ${captain.id}
+                  `;
+                }
+                for (const { need, id } of newNeeds) {
+                  yield* sql`INSERT INTO captain_needs ${sql.insert({
+                    need_id: id,
+                    captain_id: captain.id,
+                    kind: need.kind,
+                    summary: need.summary,
+                    detail: need.detail ?? null,
+                    status: "open",
+                    resolution: null,
+                    created_at: now,
+                    resolved_at: null,
+                  })}`;
+                  raisedIds.push(id);
+                }
+                const withdraw = input.withdrawNeedIds ?? [];
+                if (withdraw.length > 0) {
+                  // Scoped to this captain so it cannot close another captain's needs.
+                  yield* sql`
+                    UPDATE captain_needs
+                    SET status = 'resolved', resolution = 'Withdrawn by the captain.', resolved_at = ${now}
+                    WHERE captain_id = ${captain.id} AND status = 'open'
+                      AND ${sql.in("need_id", withdraw)}
+                  `;
+                }
+                yield* touch(captain.id, now);
+              }),
+            )
+            .pipe(Effect.mapError(unavailable("save the captain's report")));
+          yield* notifyChanged;
+          const summary = yield* summaryOf(captain.id);
+          return {
+            captain: summary,
+            raised: summary.openNeeds.filter((need) => raisedIds.includes(need.id)),
+          };
+        }),
       );
-      yield* sql
-        .withTransaction(
-          Effect.gen(function* () {
-            if (input.plan !== undefined) {
-              yield* sql`
-                UPDATE captains SET plan = ${input.plan}, plan_updated_at = ${now}
-                WHERE captain_id = ${captain.id}
-              `;
-            }
-            for (const { need, id } of newNeeds) {
-              yield* sql`INSERT INTO captain_needs ${sql.insert({
-                need_id: id,
-                captain_id: captain.id,
-                kind: need.kind,
-                summary: need.summary,
-                detail: need.detail ?? null,
-                status: "open",
-                resolution: null,
-                created_at: now,
-                resolved_at: null,
-              })}`;
-              raisedIds.push(id);
-            }
-            const withdraw = input.withdrawNeedIds ?? [];
-            if (withdraw.length > 0) {
-              // Scoped to this captain so it cannot close another captain's needs.
-              yield* sql`
-                UPDATE captain_needs
-                SET status = 'resolved', resolution = 'Withdrawn by the captain.', resolved_at = ${now}
-                WHERE captain_id = ${captain.id} AND status = 'open'
-                  AND ${sql.in("need_id", withdraw)}
-              `;
-            }
-            yield* touch(captain.id, now);
-          }),
-        )
-        .pipe(Effect.mapError(unavailable("save the captain's report")));
-      yield* notifyChanged;
-      const summary = yield* summaryOf(captain.id);
-      return {
-        captain: summary,
-        raised: summary.openNeeds.filter((need) => raisedIds.includes(need.id)),
-      };
     },
   );
 
