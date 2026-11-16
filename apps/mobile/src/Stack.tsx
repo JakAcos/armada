@@ -43,6 +43,7 @@ import {
   type RenderFailureProps,
 } from "./components/RenderErrorBoundary";
 import { ArchivedThreadsRouteScreen } from "./features/archive/ArchivedThreadsRouteScreen";
+import { CaptainsRouteScreen } from "./features/captains/CaptainsRouteScreen";
 import { ConnectOnboardingRouteScreen } from "./features/cloud/ConnectOnboardingRouteScreen";
 import { AttachmentFileScreen } from "./features/files/AttachmentFileScreen";
 import { ThreadFilesTreeScreen, ThreadFileScreen } from "./features/files/ThreadFilesRouteScreen";
@@ -294,6 +295,11 @@ const SETTINGS_SCREENS = {
       ...settingsPage("Scheduled tasks"),
       headerTitleStyle: { fontSize: 16, fontWeight: "800" },
     },
+  }),
+  SettingsCaptains: createNativeStackScreen({
+    screen: CaptainsRouteScreen,
+    linking: "settings/captains",
+    options: settingsPage("Captains"),
   }),
   SettingsScheduledTaskNew: createNativeStackScreen({
     screen: SettingsScheduledTaskNewRouteScreen,
