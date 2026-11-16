@@ -125,6 +125,7 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
+import * as Captains from "./captains/CaptainService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
@@ -1471,6 +1472,7 @@ export const layerWsRpc = (
       const commandOutputHub = yield* CommandOutputHub.CommandOutputHub;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const captains = yield* Captains.CaptainService;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const guestShares = yield* GuestShareService.GuestShareService;
       const pullRequests = yield* PullRequestService.PullRequestService;
@@ -2328,6 +2330,15 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.getWebhookDelivery(input)),
           ),
+        [WS_METHODS.captainsSubscribe]: (input) => captains.subscribeList(input),
+        [WS_METHODS.captainsCreate]: (input) =>
+          captains.create({ ...input, createdBy: "user", creationSource: "web" }),
+        [WS_METHODS.captainsDigest]: (input) => captains.digest(input.captainId),
+        [WS_METHODS.captainsMessage]: (input) =>
+          captains.message({ ...input, createdBy: "user", creationSource: "web" }),
+        [WS_METHODS.captainsResolveNeed]: (input) =>
+          captains.resolveNeed({ ...input, createdBy: "user", creationSource: "web" }),
+        [WS_METHODS.captainsSetStatus]: (input) => captains.setStatus(input),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
         [WS_METHODS.serverGetConfig]: (_input) =>
           loadServerConfig({

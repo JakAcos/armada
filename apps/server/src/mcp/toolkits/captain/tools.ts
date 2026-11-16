@@ -1,0 +1,97 @@
+import {
+  CaptainCreateInput,
+  CaptainDigest,
+  CaptainId,
+  CaptainListResult,
+  CaptainMessageInput,
+  CaptainMutationResult,
+  CaptainReportInput,
+  CaptainReportResult,
+  CaptainResolveNeedInput,
+  CaptainResolveNeedResult,
+  OrchestratorMcpFailure,
+  ProjectId,
+} from "@t3tools/contracts";
+import { McpSchema, Tool, Toolkit } from "effect/ai";
+import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
+
+import * as CaptainService from "../../../captains/CaptainService.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+
+const shared = {
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    CaptainService.CaptainService,
+  ],
+};
+
+const CaptainCreateTool = Tool.make("captain_create", {
+  ...shared,
+  description:
+    "Start a Captain: a long-lived orchestrator thread that owns `charter` in one project, runs a crew of child tasks, and surfaces only blockers and decisions to the user. Only when the user asks for a captain.",
+  parameters: CaptainCreateInput.mapFields(Struct.omit(["modelSelection"])),
+  success: CaptainMutationResult,
+})
+  .annotate(Tool.Title, "Start a captain")
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.OpenWorld, true);
+
+const CaptainListTool = Tool.make("captain_list", {
+  ...shared,
+  description:
+    "List captains and their open needs-you items. With `captainId`, also return its digest: plan, crew status, and recently resolved needs.",
+  parameters: Schema.Struct({
+    projectId: Schema.optional(ProjectId),
+    captainId: Schema.optional(CaptainId),
+  }),
+  success: Schema.Struct({
+    ...CaptainListResult.fields,
+    digest: Schema.optional(CaptainDigest),
+  }),
+})
+  .annotate(Tool.Title, "List captains")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+
+const CaptainMessageTool = Tool.make("captain_message", {
+  ...shared,
+  description: "Send the user's instruction to a captain. It is queued as the captain's next turn.",
+  parameters: CaptainMessageInput,
+  success: CaptainMutationResult,
+})
+  .annotate(Tool.Title, "Message a captain")
+  .annotate(Tool.Destructive, false);
+
+const CaptainResolveNeedTool = Tool.make("captain_resolve_need", {
+  ...shared,
+  description:
+    "Resolve a captain's open need with the user's answer. The captain receives `resolution` as a message. Only with the user's actual answer.",
+  parameters: CaptainResolveNeedInput,
+  success: CaptainResolveNeedResult,
+})
+  .annotate(Tool.Title, "Resolve a captain's need")
+  .annotate(Tool.Destructive, false);
+
+const CaptainReportTool = Tool.make("captain_report", {
+  ...shared,
+  description:
+    "Captains only: save your plan, raise needs-you items (blockers or decisions only the user can settle), or withdraw open ones.",
+  parameters: CaptainReportInput,
+  success: CaptainReportResult,
+})
+  .annotate(Tool.Title, "Captain report")
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
+
+export const CaptainToolkit = Toolkit.make(
+  CaptainCreateTool,
+  CaptainListTool,
+  CaptainMessageTool,
+  CaptainResolveNeedTool,
+  CaptainReportTool,
+);
