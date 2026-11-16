@@ -726,6 +726,13 @@ it.effect("two captains are stopped after six messages until the user speaks to 
       yield* service.resolveNeed({ needId: need.id, resolution: "Yes.", ...fromUser });
       yield* exchange(service, docs, infra, 6);
       yield* capped;
+
+      // A message the user types into a thread counts only when that thread is a captain's.
+      yield* service.userSpokeIn(ThreadId.make("thread:helper"));
+      yield* capped;
+      yield* service.userSpokeIn(docs.threadId);
+      yield* exchange(service, docs, infra, 6);
+      yield* capped;
     }),
   ),
 );
@@ -756,7 +763,7 @@ it.effect("a refused or undelivered message does not count toward the limit", ()
   ),
 );
 
-it.effect("two captains messaging each other at once cannot both take the last slot", () =>
+it.effect("a message being sent holds its slot against a racing reply and a user's reset", () =>
   withService((service, harness) =>
     Effect.gen(function* () {
       const { captain: docs } = yield* createCaptain(service);
@@ -774,6 +781,21 @@ it.effect("two captains messaging each other at once cannot both take the last s
 
       assert.include(refusalOf(reply), "Stop messaging Captain Docs");
       assert.lengthOf(yield* Ref.get(harness.sends), 6);
+
+      // The user speaks while a message is being sent: it keeps its slot in the new count.
+      yield* service.userSpokeIn(docs.threadId);
+      const held = yield* closeGate(harness.sendGate);
+      const inFlight = yield* peerMessage(service, docs, infra).pipe(Effect.forkChild);
+      yield* Deferred.await(held.reached);
+      yield* Ref.set(harness.sendGate, undefined);
+      yield* service.userSpokeIn(docs.threadId);
+      yield* Deferred.succeed(held.release, undefined);
+      yield* Fiber.join(inFlight);
+      yield* exchange(service, infra, docs, 5);
+      assert.include(
+        refusalOf(yield* Effect.exit(peerMessage(service, docs, infra))),
+        "Stop messaging Captain Infra",
+      );
     }),
   ),
 );

@@ -33,8 +33,9 @@ message other captains.
 
 Two captains can exchange six messages, in either direction, before one of them hears from you.
 After that, the next message between them is refused and the captain is told to raise a need
-instead. A message you send to either captain, or an answer to either captain's need, lets them
-carry on. Decisions still come to you: captains cannot answer each other's needs.
+instead. A message you send to either captain, from its card or in its thread, or an answer to
+either captain's need, lets them carry on. Decisions still come to you: captains cannot answer
+each other's needs.
 
 ## Needs you
 

@@ -113,6 +113,8 @@ export class CaptainService extends Context.Service<
       callerThreadId: ThreadId,
       input: CaptainReportInput,
     ) => Effect.Effect<CaptainReportResult, CaptainError>;
+    /** The user wrote in this thread themselves. In a captain's thread, that is speaking to it. */
+    readonly userSpokeIn: (threadId: ThreadId) => Effect.Effect<void>;
   }
 >()("t3/captains/CaptainService") {}
 
@@ -883,7 +885,19 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const userSpokeIn: CaptainService["Service"]["userSpokeIn"] = Effect.fn(
+    "CaptainService.userSpokeIn",
+  )(function* (threadId) {
+    // Every message the user sends in any thread passes here; almost none has a tally to reset.
+    if ((yield* Ref.get(peerTallies)).size === 0) return;
+    const captain = yield* findCaptain({ threadId }).pipe(
+      Effect.orElseSucceed(() => Option.none<Captain>()),
+    );
+    if (Option.isSome(captain)) yield* heardFromUser(captain.value.id);
+  });
+
   return CaptainService.of({
+    userSpokeIn,
     create,
     list,
     subscribeList,
