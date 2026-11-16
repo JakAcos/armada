@@ -1,7 +1,7 @@
 import { ProviderInstanceId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { captainModelChoice } from "./CaptainsPage.logic";
+import { captainModelChoice, listCaptainModelInUse } from "./CaptainsPage.logic";
 
 const codex = ProviderInstanceId.make("codex");
 const claude = ProviderInstanceId.make("claudeAgent");
@@ -38,6 +38,13 @@ describe("captainModelChoice", () => {
       enabled: [codex],
       expected: { send: undefined, shown: projectDefault },
     },
+    {
+      name: "a default whose provider the project disables is not offered",
+      picked: null,
+      projectDefault,
+      enabled: [claude],
+      expected: { send: undefined, shown: null },
+    },
   ])("$name", ({ picked: pick, projectDefault: fallback, enabled, expected }) => {
     const entries = [codex, claude].map((instanceId) => ({
       instanceId,
@@ -46,5 +53,32 @@ describe("captainModelChoice", () => {
     expect(captainModelChoice({ picked: pick, projectDefault: fallback, entries })).toEqual(
       expected,
     );
+  });
+});
+
+describe("listCaptainModelInUse", () => {
+  const visible = { slug: "gpt-5-mini", name: "GPT-5 Mini" };
+  const options = new Map([[codex, [visible]]]);
+  const entries = [{ instanceId: codex, models: [{ slug: "gpt-5", name: "GPT-5" }] }];
+
+  it.each([
+    {
+      name: "a model hidden from the picker is listed under its own name",
+      shown: projectDefault,
+      expected: [visible, { slug: "gpt-5", name: "GPT-5" }],
+    },
+    {
+      name: "a model the provider does not report is listed by its id",
+      shown: { instanceId: codex, model: "gpt-custom" },
+      expected: [visible, { slug: "gpt-custom", name: "gpt-custom" }],
+    },
+    {
+      name: "a listed model changes nothing",
+      shown: { instanceId: codex, model: visible.slug },
+      expected: [visible],
+    },
+    { name: "no model in use changes nothing", shown: null, expected: [visible] },
+  ])("$name", ({ shown, expected }) => {
+    expect(listCaptainModelInUse({ options, shown, entries }).get(codex)).toEqual(expected);
   });
 });

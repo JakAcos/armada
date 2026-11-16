@@ -46,7 +46,7 @@ import { ScrollArea } from "../ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { captainModelChoice } from "./CaptainsPage.logic";
+import { captainModelChoice, listCaptainModelInUse } from "./CaptainsPage.logic";
 
 /** The server's reason is the useful part ("no default model", "thread is archived"), so show it. */
 function reportFailure(title: string, result: AtomCommandResult<unknown, unknown>) {
@@ -476,7 +476,7 @@ function NewCaptainForm({
       <div className="flex flex-wrap items-center justify-end gap-2">
         {model.shown === null ? (
           <p className="flex-1 text-muted-foreground text-xs" role="status">
-            {selectedProject?.title} has no default model. Choose one for this captain.
+            {selectedProject?.title} has no default model it can use. Choose one for this captain.
           </p>
         ) : null}
         <ProviderModelPicker
@@ -487,12 +487,16 @@ function NewCaptainForm({
           model={model.shown?.model ?? ""}
           lockedProvider={null}
           instanceEntries={instanceEntries}
-          modelOptionsByInstance={getCustomModelOptionsByInstance(
-            settings,
-            providers,
-            model.shown?.instanceId,
-            model.shown?.model,
-          )}
+          modelOptionsByInstance={listCaptainModelInUse({
+            options: getCustomModelOptionsByInstance(
+              settings,
+              providers,
+              model.shown?.instanceId,
+              model.shown?.model,
+            ),
+            shown: model.shown,
+            entries: instanceEntries,
+          })}
           isComposerOwned={false}
           disabled={!canOperate || pending}
           triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
