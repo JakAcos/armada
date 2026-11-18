@@ -12,6 +12,8 @@ import {
   AuthOrchestrationReadScope,
   AuthSessionId,
   AuthSourceControlWriteScope,
+  CaptainId,
+  CaptainNeedId,
   ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   EnvironmentId,
@@ -2617,6 +2619,127 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
     Effect.provide(
       Layer.mergeAll(
         EventSink.layer.pipe(Layer.provideMerge(acpStores)),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+  ),
+);
+
+const captainMutationTags = [
+  WS_METHODS.captainsCreate,
+  WS_METHODS.captainsMessage,
+  WS_METHODS.captainsResolveNeed,
+  WS_METHODS.captainsSetStatus,
+] as const;
+const captainMutationRpcs = WsRpcGroup.omit(
+  ...[...WsRpcGroup.requests.keys()].filter(
+    (
+      tag,
+    ): tag is Exclude<
+      keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES,
+      (typeof captainMutationTags)[number]
+    > => !(captainMutationTags as ReadonlyArray<string>).includes(tag),
+  ),
+);
+
+it.effect("captain commands record the sending client and read an omitted one as web", () =>
+  Effect.gen(function* () {
+    const captainId = CaptainId.make("captain");
+    const needId = CaptainNeedId.make("need");
+    const captain = {
+      id: captainId,
+      projectId: ProjectId.make("project"),
+      name: "Docs",
+      charter: "Own the docs.",
+      threadId: ThreadId.make("captain-thread"),
+      status: "active" as const,
+      plan: "",
+      planUpdatedAt: null,
+      createdAt: "2026-11-16T00:00:00.000Z",
+      updatedAt: "2026-11-16T00:00:00.000Z",
+      openNeeds: [],
+    };
+    const recorded: Array<readonly [string, string]> = [];
+    const record = (method: string, input: Captains.CaptainProvenance) =>
+      Effect.sync(() => recorded.push([method, `${input.createdBy}:${input.creationSource}`]));
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(Captains.CaptainService)({
+        create: (input) => record("create", input).pipe(Effect.as({ captain })),
+        message: (input) => record("message", input).pipe(Effect.as({ captain })),
+        resolveNeed: (input) =>
+          record("resolveNeed", input).pipe(
+            Effect.as({
+              captain,
+              need: {
+                id: needId,
+                captainId,
+                kind: "decision" as const,
+                summary: "Pick one",
+                detail: null,
+                status: "resolved" as const,
+                resolution: "A",
+                createdAt: "2026-11-16T00:00:00.000Z",
+                resolvedAt: "2026-11-16T00:00:00.000Z",
+              },
+            }),
+          ),
+        setStatus: (input) => record("setStatus", input).pipe(Effect.as({ captain })),
+      }),
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+    );
+    const client = yield* RpcTest.makeClient(captainMutationRpcs).pipe(
+      Effect.provide(
+        layerWsRpc(
+          {
+            sessionId: AuthSessionId.make("captain-test"),
+            subject: "captain-test",
+            method: "browser-session-cookie",
+            scopes: [AuthOrchestrationOperateScope],
+          },
+          {},
+          yield* ServerBrowser.ServerBrowser,
+          () => Effect.void,
+          { secretReferences: true },
+        ).pipe(
+          Layer.provide(services),
+          Layer.merge(RpcAuthorization.layer([AuthOrchestrationOperateScope])),
+        ),
+      ),
+    );
+
+    yield* client[WS_METHODS.captainsCreate]({
+      projectId: captain.projectId,
+      name: "Docs",
+      charter: "Own the docs.",
+    });
+    yield* client[WS_METHODS.captainsMessage]({ captainId, text: "Hi", creationSource: "mobile" });
+    yield* client[WS_METHODS.captainsResolveNeed]({
+      needId,
+      resolution: "A",
+      creationSource: "mobile",
+    });
+    yield* client[WS_METHODS.captainsSetStatus]({ captainId, status: "retired" });
+    assert.deepEqual(recorded, [
+      ["create", "user:web"],
+      ["message", "user:mobile"],
+      ["resolveNeed", "user:mobile"],
+      ["setStatus", "user:web"],
+    ]);
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),

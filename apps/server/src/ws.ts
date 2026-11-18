@@ -2332,14 +2332,30 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.captainsSubscribe]: (input) => captains.subscribeList(input),
         [WS_METHODS.captainsCreate]: (input) =>
-          captains.create({ ...input, createdBy: "user", creationSource: "web" }),
+          captains.create({
+            ...input,
+            createdBy: "user",
+            creationSource: input.creationSource ?? "web",
+          }),
         [WS_METHODS.captainsDigest]: (input) => captains.digest(input.captainId),
         [WS_METHODS.captainsMessage]: (input) =>
-          captains.message({ ...input, createdBy: "user", creationSource: "web" }),
+          captains.message({
+            ...input,
+            createdBy: "user",
+            creationSource: input.creationSource ?? "web",
+          }),
         [WS_METHODS.captainsResolveNeed]: (input) =>
-          captains.resolveNeed({ ...input, createdBy: "user", creationSource: "web" }),
+          captains.resolveNeed({
+            ...input,
+            createdBy: "user",
+            creationSource: input.creationSource ?? "web",
+          }),
         [WS_METHODS.captainsSetStatus]: (input) =>
-          captains.setStatus({ ...input, createdBy: "user", creationSource: "web" }),
+          captains.setStatus({
+            ...input,
+            createdBy: "user",
+            creationSource: input.creationSource ?? "web",
+          }),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
         [WS_METHODS.serverGetConfig]: (_input) =>
           loadServerConfig({

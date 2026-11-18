@@ -95,6 +95,7 @@ const ACTION_ICONS: Record<string, AppSymbolName> = {
   appearance: "paintbrush",
   environments: "desktopcomputer",
   usage: "chart.bar.xaxis",
+  captains: "person.2",
   archive: "archivebox",
   files: "doc.text",
   terminal: "terminal",
@@ -334,6 +335,13 @@ export function CommandPalette(props: {
         title: "Scheduled tasks",
         searchTerms: ["schedule", "automations", "recurring"],
         run: () => openSettings(navigation, "SettingsScheduledTasks"),
+      },
+      {
+        key: "captains",
+        kind: "action",
+        title: "Captains",
+        searchTerms: ["captain", "orchestrator", "needs you", "blockers", "decisions", "crew"],
+        run: () => openSettings(navigation, "SettingsCaptains"),
       },
       {
         key: "usage",

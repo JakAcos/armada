@@ -9,6 +9,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { OrchestrationV2CreationSource } from "./orchestrationV2.ts";
 
 export const CaptainId = TrimmedNonEmptyString.pipe(Schema.brand("CaptainId"));
 export type CaptainId = typeof CaptainId.Type;
@@ -115,6 +116,8 @@ export const CaptainCreateInput = Schema.Struct({
     description: "The area the captain owns and the outcome it works toward.",
   }),
   modelSelection: Schema.optional(ModelSelection),
+  /** The client that sent it. Omitted by older clients, which the server reads as web. */
+  creationSource: Schema.optional(OrchestrationV2CreationSource),
 });
 export type CaptainCreateInput = typeof CaptainCreateInput.Type;
 
@@ -124,6 +127,7 @@ export type CaptainDigestInput = typeof CaptainDigestInput.Type;
 export const CaptainMessageInput = Schema.Struct({
   captainId: CaptainId,
   text: CaptainMessageText,
+  creationSource: Schema.optional(OrchestrationV2CreationSource),
 });
 export type CaptainMessageInput = typeof CaptainMessageInput.Type;
 
@@ -132,12 +136,14 @@ export const CaptainResolveNeedInput = Schema.Struct({
   resolution: CaptainMessageText.annotate({
     description: "The user's answer or decision. The captain receives it as a message.",
   }),
+  creationSource: Schema.optional(OrchestrationV2CreationSource),
 });
 export type CaptainResolveNeedInput = typeof CaptainResolveNeedInput.Type;
 
 export const CaptainSetStatusInput = Schema.Struct({
   captainId: CaptainId,
   status: CaptainStatus,
+  creationSource: Schema.optional(OrchestrationV2CreationSource),
 });
 export type CaptainSetStatusInput = typeof CaptainSetStatusInput.Type;
 
