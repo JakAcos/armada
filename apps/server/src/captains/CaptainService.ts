@@ -37,9 +37,11 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
@@ -54,6 +56,7 @@ import {
   CAPTAIN_REACTIVATED_MESSAGE,
   CAPTAIN_RETIRED_MESSAGE,
   captainBriefing,
+  captainPeerMessage,
   captainResolutionMessage,
   captainUserMessage,
 } from "./captainPrompt.ts";
@@ -61,7 +64,10 @@ import {
 export interface CaptainProvenance {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
-  /** The agent thread that relays this, if one does. A captain's thread cannot answer a need. */
+  /**
+   * The agent thread that relays this, if one does. A captain's thread speaks as that captain,
+   * never for the user: its messages are a peer's, and it cannot answer a need.
+   */
   readonly senderThreadId?: ThreadId;
 }
 
@@ -74,6 +80,8 @@ export interface CaptainCreateRequest extends CaptainCreateInput, CaptainProvena
 /** A captain, or the captain that raised a need. */
 export type CaptainTarget = { readonly captainId: CaptainId } | { readonly needId: CaptainNeedId };
 
+/** Messages two captains may exchange, either way, before the user speaks to one of them again. */
+const PEER_MESSAGE_LIMIT = 6;
 const RECENTLY_RESOLVED_LIMIT = 10;
 const CREW_RESULT_PREVIEW_LENGTH = 600;
 const LIVE_THREAD_CHECK_CONCURRENCY = 8;
@@ -105,6 +113,8 @@ export class CaptainService extends Context.Service<
       callerThreadId: ThreadId,
       input: CaptainReportInput,
     ) => Effect.Effect<CaptainReportResult, CaptainError>;
+    /** The user wrote in this thread themselves. In a captain's thread, that is speaking to it. */
+    readonly userSpokeIn: (threadId: ThreadId) => Effect.Effect<void>;
   }
 >()("t3/captains/CaptainService") {}
 
@@ -189,6 +199,16 @@ const launchFailure = (
     : unavailable("start the captain's thread")(error);
 };
 
+interface PeerTally {
+  readonly captains: readonly [CaptainId, CaptainId];
+  readonly delivered: number;
+  /** Messages still being sent hold their slot, so a racing message cannot take it too. */
+  readonly sending: number;
+}
+
+/** Either direction between two captains is one conversation. */
+const pairKey = (a: CaptainId, b: CaptainId) => (a < b ? `${a} ${b}` : `${b} ${a}`);
+
 const ACTIVE_CREW_STATUSES = new Set(["idle", "pending", "running", "waiting"]);
 
 /** The preview's last unit is never half of a surrogate pair, which would not encode as text. */
@@ -236,6 +256,45 @@ const make = Effect.gen(function* () {
   // A change re-emits the whole list; a slow subscriber needs only the latest signal.
   const changes = yield* PubSub.sliding<void>(1);
   const notifyChanged = PubSub.publish(changes, undefined).pipe(Effect.asVoid);
+  // In memory: a restart only grants a loop another PEER_MESSAGE_LIMIT messages, so it stays bounded.
+  const peerTallies = yield* Ref.make<ReadonlyMap<string, PeerTally>>(new Map());
+
+  /** Takes a slot in the pair's conversation, or refuses when the user must speak first. */
+  const reservePeerSlot = (sender: Captain, receiver: Captain) =>
+    Ref.modify(peerTallies, (tallies) => {
+      const key = pairKey(sender.id, receiver.id);
+      const tally = tallies.get(key) ?? {
+        captains: [sender.id, receiver.id] as const,
+        delivered: 0,
+        sending: 0,
+      };
+      if (tally.delivered + tally.sending >= PEER_MESSAGE_LIMIT) return [false, tallies] as const;
+      return [true, new Map(tallies).set(key, { ...tally, sending: tally.sending + 1 })] as const;
+    });
+
+  /** A message that was not delivered gives its slot back. */
+  const settlePeerSlot = (sender: Captain, receiver: Captain, delivered: boolean) =>
+    Ref.update(peerTallies, (tallies) => {
+      const key = pairKey(sender.id, receiver.id);
+      const tally = tallies.get(key);
+      if (tally === undefined) return tallies;
+      return new Map(tallies).set(key, {
+        ...tally,
+        delivered: tally.delivered + (delivered ? 1 : 0),
+        sending: tally.sending - 1,
+      });
+    });
+
+  /** The user spoke to this captain, so each of its conversations with a peer starts over. */
+  const heardFromUser = (captainId: CaptainId) =>
+    Ref.update(peerTallies, (tallies) => {
+      const next = new Map<string, PeerTally>();
+      for (const [key, tally] of tallies) {
+        if (!tally.captains.includes(captainId)) next.set(key, tally);
+        else if (tally.sending > 0) next.set(key, { ...tally, delivered: 0 });
+      }
+      return next;
+    });
 
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
   const uuid = randomUuidV4;
@@ -546,6 +605,25 @@ const make = Effect.gen(function* () {
     return (yield* requireCaptain(captainId)).threadId;
   });
 
+  /**
+   * The captain a message comes from, if a captain's thread sent it. Its row is read without its
+   * own lock: holding two captains' locks would deadlock two captains messaging each other. A
+   * retirement that lands after this read is simply ordered after the message.
+   */
+  const peerSender = Effect.fn("CaptainService.peerSender")(function* (
+    senderThreadId: ThreadId | undefined,
+  ) {
+    if (senderThreadId === undefined) return Option.none<Captain>();
+    const sender = yield* findCaptain({ threadId: senderThreadId });
+    if (Option.isSome(sender) && sender.value.status === "retired") {
+      return yield* new CaptainError({
+        code: "retired",
+        message: `You are retired, Captain ${sender.value.name}, so you cannot message other captains. End this turn.`,
+      });
+    }
+    return sender;
+  });
+
   const message: CaptainService["Service"]["message"] = Effect.fn("CaptainService.message")(
     function* (input) {
       yield* tellLock.withLock(
@@ -563,7 +641,21 @@ const make = Effect.gen(function* () {
                   "A captain cannot message itself. Use `captain_report` to update your plan or needs.",
               });
             }
-            yield* sendToCaptain(captain, captainUserMessage(input.text, input.createdBy), input);
+            const peer = yield* peerSender(input.senderThreadId);
+            if (Option.isNone(peer)) {
+              yield* sendToCaptain(captain, captainUserMessage(input.text, input.createdBy), input);
+              if (input.createdBy === "user") yield* heardFromUser(captain.id);
+            } else {
+              if (!(yield* reservePeerSlot(peer.value, captain))) {
+                return yield* new CaptainError({
+                  code: "invalid_request",
+                  message: `You and Captain ${captain.name} have exchanged ${PEER_MESSAGE_LIMIT} messages since the user last spoke to either of you. Stop messaging Captain ${captain.name}. If you are stuck, raise a need for the user with \`captain_report\`.`,
+                });
+              }
+              yield* sendToCaptain(captain, captainPeerMessage(input.text, peer.value), input).pipe(
+                Effect.onExit((exit) => settlePeerSlot(peer.value, captain, Exit.isSuccess(exit))),
+              );
+            }
             yield* touch(captain.id, yield* nowIso).pipe(Effect.ignore({ log: true }));
             yield* notifyChanged;
           }),
@@ -624,6 +716,7 @@ const make = Effect.gen(function* () {
             captainResolutionMessage(need, input.resolution, input.createdBy),
             input,
           ).pipe(Effect.onError(() => reopen));
+          if (input.createdBy === "user") yield* heardFromUser(captain.id);
           yield* touch(captain.id, now).pipe(Effect.ignore({ log: true }));
           // Inside the protected step: a caller that disconnected still changed the list.
           yield* notifyChanged;
@@ -792,7 +885,19 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const userSpokeIn: CaptainService["Service"]["userSpokeIn"] = Effect.fn(
+    "CaptainService.userSpokeIn",
+  )(function* (threadId) {
+    // Every message the user sends in any thread passes here; almost none has a tally to reset.
+    if ((yield* Ref.get(peerTallies)).size === 0) return;
+    const captain = yield* findCaptain({ threadId }).pipe(
+      Effect.orElseSucceed(() => Option.none<Captain>()),
+    );
+    if (Option.isSome(captain)) yield* heardFromUser(captain.value.id);
+  });
+
   return CaptainService.of({
+    userSpokeIn,
     create,
     list,
     subscribeList,

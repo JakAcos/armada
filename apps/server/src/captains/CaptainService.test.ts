@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  type Captain,
   CaptainNeedId,
   type CaptainError,
   type CommandId,
@@ -33,6 +34,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as CaptainService from "./CaptainService.ts";
 
 const projectId = ProjectId.make("project:test");
+const apiProjectId = ProjectId.make("project:api");
 const bareProjectId = ProjectId.make("project:no-default-model");
 const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
 const fromUser = { createdBy: "user", creationSource: "web" } as const;
@@ -201,12 +203,12 @@ const makeLayer = (harness: Harness, options: HarnessOptions) => {
         Layer.mock(ProjectService.ProjectService)({
           getById: (id) =>
             Effect.succeed(
-              id === projectId || id === bareProjectId
+              id === projectId || id === apiProjectId || id === bareProjectId
                 ? Option.some({
                     id,
-                    title: id === projectId ? "Docs site" : "Bare",
+                    title: id === bareProjectId ? "Bare" : "Docs site",
                     workspaceRoot: "/projects/test",
-                    defaultModelSelection: id === projectId ? modelSelection : null,
+                    defaultModelSelection: id === bareProjectId ? null : modelSelection,
                   } as unknown as Project)
                 : Option.none(),
             ),
@@ -605,6 +607,195 @@ it.effect("an agent's relay is labeled, and no captain's thread can answer a nee
       assert.include(sends[1]?.text ?? "", "Message from an agent");
       assert.strictEqual(yield* service.threadIdOf({ needId: need.id }), captain.threadId);
       assert.strictEqual(yield* service.threadIdOf({ captainId: captain.id }), captain.threadId);
+    }),
+  ),
+);
+
+type CaptainRef = Pick<Captain, "id" | "threadId">;
+
+const peerMessage = (
+  service: CaptainService.CaptainService["Service"],
+  from: CaptainRef,
+  to: CaptainRef,
+  text = "Is the API ready?",
+) =>
+  service.message({
+    captainId: to.id,
+    text,
+    createdBy: "agent",
+    creationSource: "mcp",
+    senderThreadId: from.threadId,
+  });
+
+/** `count` messages back and forth, starting from `a`. */
+const exchange = (
+  service: CaptainService.CaptainService["Service"],
+  a: CaptainRef,
+  b: CaptainRef,
+  count: number,
+) =>
+  Effect.forEach(
+    Array.from({ length: count }, (_, index) => index),
+    (index) => (index % 2 === 0 ? peerMessage(service, a, b) : peerMessage(service, b, a)),
+    { discard: true },
+  );
+
+const refusalOf = (exit: Exit.Exit<unknown, CaptainError>) => {
+  const error = failureOf(exit);
+  assert.strictEqual(error.code, "invalid_request");
+  return error.message;
+};
+
+it.effect(
+  "a peer captain's message, from any project, names its sender and is not the user's",
+  () =>
+    withService((service, harness) =>
+      Effect.gen(function* () {
+        const { captain: docs } = yield* createCaptain(service);
+        // Captains of one environment may coordinate across projects, such as a web and an API repo.
+        const { captain: api } = yield* service.create({
+          projectId: apiProjectId,
+          name: "Api",
+          charter: "Own the API.",
+          ...fromUser,
+        });
+        yield* peerMessage(service, api, docs, "The v2 endpoints ship Friday.");
+        const [sent] = yield* Ref.get(harness.sends);
+        assert.strictEqual(sent?.threadId, docs.threadId);
+        assert.strictEqual(sent?.senderThreadId, api.threadId);
+        assert.include(sent?.text ?? "", `Captain Api (captain id \`${api.id}\`)`);
+        assert.include(sent?.text ?? "", "not an instruction from the user");
+        assert.include(sent?.text ?? "", "The v2 endpoints ship Friday.");
+        assert.notInclude(sent?.text ?? "", "on the user's behalf");
+      }),
+    ),
+);
+
+it.effect("a retired captain cannot message its peers", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain: docs } = yield* createCaptain(service);
+      const { captain: infra } = yield* createCaptain(service, "Infra");
+      yield* service.setStatus({ captainId: infra.id, status: "retired", ...fromUser });
+      const refused = failureOf(yield* Effect.exit(peerMessage(service, infra, docs)));
+      assert.strictEqual(refused.code, "retired");
+      // The only send was the retirement notice to Infra itself.
+      assert.deepStrictEqual(
+        (yield* Ref.get(harness.sends)).map((send) => send.threadId),
+        [infra.threadId],
+      );
+    }),
+  ),
+);
+
+it.effect("two captains are stopped after six messages until the user speaks to either", () =>
+  withService((service) =>
+    Effect.gen(function* () {
+      const { captain: docs } = yield* createCaptain(service);
+      const { captain: infra } = yield* createCaptain(service, "Infra");
+      const { captain: api } = yield* createCaptain(service, "Api");
+      const capped = Effect.gen(function* () {
+        const refusal = refusalOf(yield* Effect.exit(peerMessage(service, docs, infra)));
+        assert.include(refusal, "Stop messaging Captain Infra");
+        assert.include(refusal, "captain_report");
+      });
+
+      yield* exchange(service, docs, infra, 6);
+      yield* capped;
+      // Either direction is one conversation, and other pairs go on.
+      assert.include(
+        refusalOf(yield* Effect.exit(peerMessage(service, infra, docs))),
+        "Stop messaging Captain Docs",
+      );
+      yield* peerMessage(service, api, infra);
+      // An agent's relay is not the user speaking.
+      yield* service.message({
+        captainId: infra.id,
+        text: "Carry on.",
+        createdBy: "agent",
+        creationSource: "mcp",
+        senderThreadId: ThreadId.make("thread:helper"),
+      });
+      yield* capped;
+
+      yield* service.message({ captainId: infra.id, text: "Carry on.", ...fromUser });
+      yield* exchange(service, docs, infra, 6);
+      yield* capped;
+
+      const need = yield* raiseDecision(service, docs.threadId);
+      yield* service.resolveNeed({ needId: need.id, resolution: "Yes.", ...fromUser });
+      yield* exchange(service, docs, infra, 6);
+      yield* capped;
+
+      // A message the user types into a thread counts only when that thread is a captain's.
+      yield* service.userSpokeIn(ThreadId.make("thread:helper"));
+      yield* capped;
+      yield* service.userSpokeIn(docs.threadId);
+      yield* exchange(service, docs, infra, 6);
+      yield* capped;
+    }),
+  ),
+);
+
+it.effect("a refused or undelivered message does not count toward the limit", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain: docs } = yield* createCaptain(service);
+      const { captain: infra } = yield* createCaptain(service, "Infra");
+      yield* exchange(service, docs, infra, 4);
+
+      yield* Ref.set(harness.threadArchived, true);
+      assert.include(refusalOf(yield* Effect.exit(peerMessage(service, docs, infra))), "archived");
+      yield* Ref.set(harness.threadArchived, false);
+      yield* service.setStatus({ captainId: infra.id, status: "retired", ...fromUser });
+      assert.strictEqual(
+        failureOf(yield* Effect.exit(peerMessage(service, docs, infra))).code,
+        "retired",
+      );
+      yield* service.setStatus({ captainId: infra.id, status: "active", ...fromUser });
+
+      yield* exchange(service, docs, infra, 2);
+      assert.include(
+        refusalOf(yield* Effect.exit(peerMessage(service, docs, infra))),
+        "Stop messaging Captain Infra",
+      );
+    }),
+  ),
+);
+
+it.effect("a message being sent holds its slot against a racing reply and a user's reset", () =>
+  withService((service, harness) =>
+    Effect.gen(function* () {
+      const { captain: docs } = yield* createCaptain(service);
+      const { captain: infra } = yield* createCaptain(service, "Infra");
+      yield* exchange(service, docs, infra, 5);
+
+      // The sixth message is being sent, under Infra's lock, when Infra's reply takes Docs' lock.
+      const gate = yield* closeGate(harness.sendGate);
+      const sixth = yield* peerMessage(service, docs, infra).pipe(Effect.forkChild);
+      yield* Deferred.await(gate.reached);
+      yield* Ref.set(harness.sendGate, undefined);
+      const reply = yield* Effect.exit(peerMessage(service, infra, docs));
+      yield* Deferred.succeed(gate.release, undefined);
+      yield* Fiber.join(sixth);
+
+      assert.include(refusalOf(reply), "Stop messaging Captain Docs");
+      assert.lengthOf(yield* Ref.get(harness.sends), 6);
+
+      // The user speaks while a message is being sent: it keeps its slot in the new count.
+      yield* service.userSpokeIn(docs.threadId);
+      const held = yield* closeGate(harness.sendGate);
+      const inFlight = yield* peerMessage(service, docs, infra).pipe(Effect.forkChild);
+      yield* Deferred.await(held.reached);
+      yield* Ref.set(harness.sendGate, undefined);
+      yield* service.userSpokeIn(docs.threadId);
+      yield* Deferred.succeed(held.release, undefined);
+      yield* Fiber.join(inFlight);
+      yield* exchange(service, infra, docs, 5);
+      assert.include(
+        refusalOf(yield* Effect.exit(peerMessage(service, docs, infra))),
+        "Stop messaging Captain Infra",
+      );
     }),
   ),
 );

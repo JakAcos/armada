@@ -2000,6 +2000,12 @@ export const layerWsRpc = (
                   Effect.tap((result) =>
                     result.replayed ? Effect.void : recordClientCommandAnalytics(command),
                   ),
+                  // A message typed into a captain's own thread is the user speaking to it.
+                  Effect.tap((result) =>
+                    result.replayed || command.type !== "message.dispatch"
+                      ? Effect.void
+                      : captains.userSpokeIn(command.threadId),
+                  ),
                   Effect.map((result) => ({ sequence: result.sequence })),
                   Effect.mapError((cause) => {
                     const detail = userFacingDispatchErrorMessage(cause);
