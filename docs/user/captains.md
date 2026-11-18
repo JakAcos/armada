@@ -22,10 +22,10 @@ model later, open the captain's thread and switch it there, as in any thread.
 
 Agents can also start and manage captains with the `captain_create`, `captain_list`,
 `captain_message`, and `captain_resolve_need` tools, but only when you ask them to. An agent can
-name a model when it starts a captain; otherwise the captain uses the project's default. The captain is
-told when a message or an answer was relayed by an agent rather than sent by you. An agent needs
-the same access to the captain's thread as it needs to message any other thread. A need is yours
-to answer: no captain can resolve one, and neither can a captain's crew.
+name a model when it starts a captain; otherwise the captain uses the project's default. The
+captain is told when a message or an answer was relayed by an agent rather than sent by you. An
+agent needs the same access to the captain's thread as it needs to message any other thread. A
+need is yours to answer: no captain can resolve one, and neither can a captain's crew.
 
 ## Needs you
 

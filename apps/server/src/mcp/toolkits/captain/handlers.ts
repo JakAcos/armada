@@ -2,8 +2,10 @@ import { type CaptainError, OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import * as CaptainService from "../../../captains/CaptainService.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as OrchestrationMcp from "../../OrchestratorMcpService.ts";
 import { readCaller } from "../../threadAccess.ts";
 import { CaptainToolkit } from "./tools.ts";
 
@@ -52,6 +54,14 @@ export const layer = McpToolAccess.toLayer(CaptainToolkit, {
     (input, modes) =>
       Effect.gen(function* () {
         const provenance = yield* fromAgent;
+        // A made-up model would leave a captain whose first turn fails at the provider.
+        if (input.modelSelection !== undefined) {
+          const { instanceId, model } = input.modelSelection;
+          const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
+          const provider = providers.find((candidate) => candidate.instanceId === instanceId);
+          if (provider !== undefined)
+            yield* OrchestrationMcp.requireAdvertisedModel(provider, model);
+        }
         const captains = yield* CaptainService.CaptainService;
         return yield* captains
           .create({

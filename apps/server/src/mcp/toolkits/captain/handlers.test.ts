@@ -6,8 +6,10 @@ import {
   CaptainNeedId,
   EnvironmentId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   type RuntimeMode,
+  type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -16,6 +18,7 @@ import * as Stream from "effect/Stream";
 
 import * as CaptainService from "../../../captains/CaptainService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
@@ -64,6 +67,7 @@ const harness = (input: {
   readonly capabilities?: ReadonlyArray<McpInvocationContext.McpCapability>;
   /** The caller is a delegated child, as a captain's crew is. */
   readonly subagent?: true;
+  readonly providers?: ReadonlyArray<ServerProvider>;
   readonly calls: Array<ServiceCall>;
 }) => {
   const record =
@@ -90,6 +94,9 @@ const harness = (input: {
             input.capabilities ?? ["orchestration"],
           ),
           issuedAt: 0,
+        }),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed(input.providers ?? []),
         }),
         Layer.mock(ThreadManagement.ThreadManagementService)({
           getThreadShell: (threadId) =>
@@ -195,5 +202,29 @@ it.effect("a delegated child, such as a captain's crew, cannot act for the user"
     expect(results.resolve).toMatchObject({ code: "capability_denied" });
     // It can still read, and a report is judged by whether its thread is a captain's.
     expect(calls.map((call) => call.method)).toEqual(["list", "report"]);
+  }),
+);
+
+it.effect("a model the provider does not advertise starts no captain", () =>
+  Effect.gen(function* () {
+    const calls: Array<ServiceCall> = [];
+    const codex: ServerProvider = {
+      instanceId: ProviderInstanceId.make("codex"),
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      status: "ready",
+      version: null,
+      auth: { status: "authenticated" },
+      checkedAt: "2026-01-01T00:00:00Z",
+      models: [{ slug: "gpt-5.4", name: "GPT", isCustom: false, capabilities: null }],
+      slashCommands: [],
+      skills: [],
+    };
+    const results = yield* callAll.pipe(
+      Effect.provide(harness({ callerMode: "full-access", providers: [codex], calls })),
+    );
+    expect(results.create).toMatchObject({ code: "model_unavailable" });
+    expect(calls.map((call) => call.method)).not.toContain("create");
   }),
 );
