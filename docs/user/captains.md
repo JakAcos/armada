@@ -12,17 +12,20 @@ Open **Captains** from the sidebar or the command palette.
 1. Open **Captains** and find **Start a captain**.
 2. Pick the project, give the captain a short name, and write its charter: what it owns and the
    outcome it works toward.
-3. Select **Start captain**.
+3. Check the model. It starts as the project's default model; pick another one for this captain
+   if you like. A project without a default model needs you to choose one here.
+4. Select **Start captain**.
 
-The captain gets its own thread in that project and runs on the project's default model and
-default mode, so set a model in the project settings first. Its first turn writes a plan, then
-starts crew tasks.
+The captain gets its own thread in that project and runs in the project's default mode. Its card
+shows the model it runs on. Its first turn writes a plan, then starts crew tasks. To change the
+model later, open the captain's thread and switch it there, as in any thread.
 
 Agents can also start and manage captains with the `captain_create`, `captain_list`,
-`captain_message`, and `captain_resolve_need` tools, but only when you ask them to. The captain is
-told when a message or an answer was relayed by an agent rather than sent by you. An agent needs
-the same access to the captain's thread as it needs to message any other thread. A need is yours
-to answer: no captain can resolve one, and neither can a captain's crew.
+`captain_message`, and `captain_resolve_need` tools, but only when you ask them to. An agent can
+name a model when it starts a captain; otherwise the captain uses the project's default. The
+captain is told when a message or an answer was relayed by an agent rather than sent by you. An
+agent needs the same access to the captain's thread as it needs to message any other thread. A
+need is yours to answer: no captain can resolve one, and neither can a captain's crew.
 
 ## Needs you
 

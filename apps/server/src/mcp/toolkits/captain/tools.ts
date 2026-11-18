@@ -14,10 +14,10 @@ import {
 } from "@t3tools/contracts";
 import { McpSchema, Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
-import * as Struct from "effect/Struct";
 
 import * as CaptainService from "../../../captains/CaptainService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const shared = {
@@ -32,9 +32,10 @@ const shared = {
 
 const CaptainCreateTool = Tool.make("captain_create", {
   ...shared,
+  dependencies: [...shared.dependencies, ProviderRegistry.ProviderRegistry],
   description:
-    "Start a Captain: a long-lived orchestrator thread that owns `charter` in one project, runs a crew of child tasks, and surfaces only blockers and decisions to the user. Only when the user asks for a captain.",
-  parameters: CaptainCreateInput.mapFields(Struct.omit(["modelSelection"])),
+    "Start a Captain: a long-lived orchestrator thread that owns `charter` in one project, runs a crew of child tasks, and surfaces only blockers and decisions to the user. Only when the user asks for a captain. Omit `modelSelection` for the project's default; values from `orchestrator_capabilities`.",
+  parameters: CaptainCreateInput,
   success: CaptainMutationResult,
 })
   .annotate(Tool.Title, "Start a captain")

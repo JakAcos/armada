@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   type AtomCommandResult,
   isAtomCommandInterrupted,
@@ -10,18 +11,33 @@ import {
   type CaptainNeed,
   type CaptainSummary,
   type EnvironmentId,
+  type ModelSelection,
   type ProjectId,
+  type ProviderInstanceId,
+  type ServerProvider,
 } from "@t3tools/contracts";
+import { pickModelSelection } from "@t3tools/shared/model";
+import {
+  type LegacyProjectSettingsFields,
+  resolveProjectSettings,
+} from "@t3tools/shared/projectSettings";
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
+import { useEnvironmentSettings } from "../../hooks/useSettings";
+import { getCustomModelOptionsByInstance } from "../../modelSelection";
+import { providerInstanceEntriesFor } from "../../providerInstances";
 import { captainEnvironment } from "../../state/captains";
-import { useProjects } from "../../state/entities";
+import { useProjects, useQuietThreadShell } from "../../state/entities";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import { formatEnvironmentQueryError, useEnvironmentQuery } from "../../state/query";
+import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { AppRouteModal, AppRouteModalClose } from "../AppRouteModal";
+import { ProviderModelPicker } from "../chat/ProviderModelPicker";
+import { getTriggerDisplayModelName } from "../chat/providerIconUtils";
+import { SETTINGS_PICKER_TRIGGER_CLASSNAME } from "../settings/settingsLayout";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -30,6 +46,7 @@ import { ScrollArea } from "../ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { captainModelChoice, listCaptainModelInUse } from "./CaptainsPage.logic";
 
 /** The server's reason is the useful part ("no default model", "thread is archived"), so show it. */
 function reportFailure(title: string, result: AtomCommandResult<unknown, unknown>) {
@@ -144,10 +161,7 @@ function CaptainEnvironmentSection({
               ))
             )}
           </div>
-          <NewCaptainForm
-            environmentId={environmentId}
-            projects={projects.map((project) => ({ id: project.id, title: project.title }))}
-          />
+          <NewCaptainForm environmentId={environmentId} projects={projects} />
         </>
       )}
     </section>
@@ -233,6 +247,12 @@ function CaptainCard({
       : null,
   );
   const retired = captain.status === "retired";
+  // The shell is already in local state when loaded; an older settled thread may be missing.
+  const modelSelection = useQuietThreadShell(
+    scopeThreadRef(environmentId, captain.threadId),
+  )?.modelSelection;
+  const providers =
+    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
   const submitMessage = async () => {
     const text = message.trim();
     if (!canMessage || sending || text.length === 0) return;
@@ -259,6 +279,11 @@ function CaptainCard({
         <span className="font-medium text-sm">Captain {captain.name}</span>
         <Badge variant={retired ? "secondary" : "success"}>{retired ? "Retired" : "Active"}</Badge>
         <span className="text-muted-foreground text-xs">{projectTitle}</span>
+        {modelSelection ? (
+          <span className="text-muted-foreground text-xs">
+            {modelLabel(providers, modelSelection)}
+          </span>
+        ) : null}
         <span className="flex-1" />
         <Button
           size="sm"
@@ -340,34 +365,68 @@ function CaptainCard({
   );
 }
 
+function modelLabel(providers: ReadonlyArray<ServerProvider>, selection: ModelSelection) {
+  const provider = providers.find((entry) => entry.instanceId === selection.instanceId);
+  const model = provider?.models.find((entry) => entry.slug === selection.model);
+  return model ? getTriggerDisplayModelName(model, provider?.driver) : selection.model;
+}
+
 function NewCaptainForm({
   environmentId,
   projects,
 }: {
   readonly environmentId: EnvironmentId;
-  readonly projects: ReadonlyArray<{ readonly id: ProjectId; readonly title: string }>;
+  readonly projects: ReadonlyArray<
+    LegacyProjectSettingsFields & { readonly id: ProjectId; readonly title: string }
+  >;
 }) {
   const [projectId, setProjectId] = useState<ProjectId | null>(null);
   const [name, setName] = useState("");
   const [charter, setCharter] = useState("");
+  const [pickedModel, setPickedModel] = useState<ModelSelection | null>(null);
   const [pending, setPending] = useState(false);
   const canOperate = useAtomValue(captainEnvironment.create.permissionAtom(environmentId));
   const create = useAtomCommand(captainEnvironment.create, { label: "start captain" });
+  const settings = useEnvironmentSettings(environmentId);
+  const providers =
+    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
   const selectedProject = projects.find((project) => project.id === projectId) ?? projects[0];
+  const instanceEntries = providerInstanceEntriesFor(
+    providers,
+    settings,
+    selectedProject?.id ?? null,
+  );
+  const model = captainModelChoice({
+    picked: pickedModel,
+    projectDefault: selectedProject
+      ? resolveProjectSettings(settings, selectedProject.id, selectedProject).settings
+          .defaultModelSelection
+      : null,
+    entries: instanceEntries,
+  });
   const ready =
-    selectedProject !== undefined && name.trim().length > 0 && charter.trim().length > 0;
+    selectedProject !== undefined &&
+    model.shown !== null &&
+    name.trim().length > 0 &&
+    charter.trim().length > 0;
   const submit = async () => {
     if (!canOperate || pending || !ready) return;
     setPending(true);
     const result = await create({
       environmentId,
-      input: { projectId: selectedProject.id, name: name.trim(), charter: charter.trim() },
+      input: {
+        projectId: selectedProject.id,
+        name: name.trim(),
+        charter: charter.trim(),
+        ...(model.send === undefined ? {} : { modelSelection: model.send }),
+      },
     });
     setPending(false);
     reportFailure("Could not start the captain", result);
     if (result._tag === "Success") {
       setName("");
       setCharter("");
+      setPickedModel(null);
     }
   };
   if (projects.length === 0) {
@@ -414,7 +473,39 @@ function NewCaptainForm({
         disabled={!canOperate || pending}
         onChange={(event) => setCharter(event.target.value)}
       />
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {model.shown === null ? (
+          <p className="flex-1 text-muted-foreground text-xs" role="status">
+            {selectedProject?.title} has no default model it can use. Choose one for this captain.
+          </p>
+        ) : null}
+        <ProviderModelPicker
+          environmentId={environmentId}
+          activeInstanceId={
+            model.shown?.instanceId ?? instanceEntries[0]?.instanceId ?? ("" as ProviderInstanceId)
+          }
+          model={model.shown?.model ?? ""}
+          lockedProvider={null}
+          instanceEntries={instanceEntries}
+          modelOptionsByInstance={listCaptainModelInUse({
+            options: getCustomModelOptionsByInstance(
+              settings,
+              providers,
+              model.shown?.instanceId,
+              model.shown?.model,
+            ),
+            shown: model.shown,
+            entries: instanceEntries,
+          })}
+          isComposerOwned={false}
+          disabled={!canOperate || pending}
+          triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+          triggerAriaLabel="Captain model"
+          {...(model.shown === null ? { triggerLabel: "Choose a model" } : {})}
+          onInstanceModelChange={(instanceId, picked) =>
+            setPickedModel(pickModelSelection(model.shown, instanceId, picked))
+          }
+        />
         <Button size="sm" type="submit" disabled={!canOperate || !ready || pending}>
           Start captain
         </Button>

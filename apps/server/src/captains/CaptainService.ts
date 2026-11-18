@@ -175,7 +175,7 @@ const launchFailure = (
   if (error._tag === "ThreadManagementProviderInstanceDisabledError") {
     return new CaptainError({
       code: "invalid_request",
-      message: `Provider "${error.instanceId}" is disabled for this project. Enable it, or set another default model for the project.`,
+      message: `Provider "${error.instanceId}" is disabled or not set up for this project. Pick another model, or enable the provider in Settings.`,
       cause: error,
     });
   }
@@ -378,7 +378,7 @@ const make = Effect.gen(function* () {
       if (modelSelection == null) {
         return yield* new CaptainError({
           code: "invalid_request",
-          message: `Project ${defaults.title} has no default model. Set one in the project's settings, then start the captain.`,
+          message: `Project ${defaults.title} has no default model. Pick a model for the captain, or set a default in the project's settings.`,
         });
       }
       const key = yield* uuid;
