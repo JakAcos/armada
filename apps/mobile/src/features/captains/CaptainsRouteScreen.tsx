@@ -92,7 +92,7 @@ function Field(props: {
         placeholderTextColorClassName="accent-foreground-muted"
         className={
           props.multiline
-            ? "min-h-20 font-sans text-base text-foreground"
+            ? "max-h-48 min-h-20 font-sans text-base text-foreground"
             : "min-h-8 font-sans text-base text-foreground"
         }
       />
