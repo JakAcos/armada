@@ -295,10 +295,11 @@ function NeedRow({
         textAlignVertical="top"
         placeholder="Your answer or decision"
         placeholderTextColorClassName="accent-foreground-muted"
-        className="min-h-16 font-sans text-base text-foreground"
+        className="max-h-32 min-h-16 font-sans text-base text-foreground"
       />
       <Button
         label="Resolve"
+        accessibilityLabel={`Resolve ${need.summary}`}
         size="compact"
         tone="primary"
         loading={pending}
@@ -443,10 +444,11 @@ function CaptainRow({
             multiline
             placeholder="Message this captain"
             placeholderTextColorClassName="accent-foreground-muted"
-            className="min-h-8 min-w-0 flex-1 font-sans text-base text-foreground"
+            className="max-h-32 min-h-8 min-w-0 flex-1 font-sans text-base text-foreground"
           />
           <Button
             label="Send"
+            accessibilityLabel={`Send to Captain ${captain.name}`}
             size="compact"
             loading={sending}
             disabled={!canMessage || sending || message.trim().length === 0}
